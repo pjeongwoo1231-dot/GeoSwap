@@ -1,5 +1,7 @@
 """CSV loading and cleaning for Hana Geo-Swap dashboard."""
 
+import io
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +13,17 @@ GRADE_MAP = {
     "중(中)질유": "medium",
     "중(重)질유": "heavy",
 }
+
+_MONTH_RE = re.compile(r"(?:(\d{2})년\s*)?(\d{1,2})월")
+_SKIP_MONTH_LABELS = {"전월비", "전년동월비", "평균", "nan", ""}
+
+
+def _read_csv_utf8(path: Path) -> pd.DataFrame:
+    """Read UTF-8 CSV, tolerating duplicate BOM markers."""
+    raw_bytes = path.read_bytes()
+    while raw_bytes.startswith(b"\xef\xbb\xbf"):
+        raw_bytes = raw_bytes[3:]
+    return pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8")
 
 
 def _extract_year_col(name: str) -> int | None:
@@ -26,7 +39,7 @@ def load_country_imports(path: Path | None = None) -> tuple[pd.DataFrame, pd.Dat
     Returns (country_rows, subtotal_rows) tidy DataFrames.
     """
     path = path or DATA_DIR / "국가별_원유수입.csv"
-    raw = pd.read_csv(path, encoding="utf-8")
+    raw = _read_csv_utf8(path)
     col0, col1 = raw.columns[0], raw.columns[1]
     year_cols = {c: _extract_year_col(c) for c in raw.columns[2:]}
     year_cols = {c: y for c, y in year_cols.items() if y is not None}
@@ -65,7 +78,7 @@ def load_grade_imports(path: Path | None = None) -> tuple[pd.DataFrame, pd.DataF
     Returns (annual_tidy, monthly_2024_or_none).
     """
     path = path or DATA_DIR / "유질별_원유수입.csv"
-    raw = pd.read_csv(path, encoding="utf-8")
+    raw = _read_csv_utf8(path)
     grade_col = raw.columns[0]
     monthly_cols = [c for c in raw.columns if str(c).startswith("2024.")]
     yearly_cols = [c for c in raw.columns if str(c).isdigit() and len(str(c)) == 4]
@@ -110,22 +123,24 @@ def load_grade_imports(path: Path | None = None) -> tuple[pd.DataFrame, pd.DataF
 def load_oil_prices(path: Path | None = None) -> pd.DataFrame:
     """Load international benchmark prices ($/barrel, monthly)."""
     path = path or DATA_DIR / "국제유가.csv"
-    raw = pd.read_csv(path, encoding="utf-8")
-
+    raw = _read_csv_utf8(path)
+    month_col = raw.columns[0]
     benchmarks = ["Dubai", "Brent", "WTI", "Oman"]
     current_year: int | None = None
     rows: list[dict] = []
 
     for _, row in raw.iterrows():
-        month_str = str(row["월"]).replace("\xa0", " ").strip()
-        if "년" in month_str:
-            parts = month_str.split()
-            year_prefix = parts[0].replace("년", "")
-            current_year = 2000 + int(year_prefix)
-            month = int(parts[1].replace("월", ""))
-        else:
-            month = int(month_str.replace("월", "").strip())
+        month_str = str(row[month_col]).replace("\xa0", " ").strip()
+        if month_str in _SKIP_MONTH_LABELS:
+            continue
 
+        match = _MONTH_RE.match(month_str)
+        if not match:
+            continue
+
+        year_prefix, month = match.group(1), int(match.group(2))
+        if year_prefix:
+            current_year = 2000 + int(year_prefix)
         if current_year is None:
             continue
 

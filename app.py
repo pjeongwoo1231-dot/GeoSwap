@@ -247,9 +247,11 @@ def tab_swap_calculator(prices):
 
     col_a, col_b = st.columns(2)
     with col_a:
-        sel_a = st.selectbox("유종 A (보유/위험 산지)", all_options_a, index=all_options_a.index("카자흐스탄 (Brent)"))
+        idx_a = all_options_a.index("카자흐스탄 (Brent)") if "카자흐스탄 (Brent)" in all_options_a else 0
+        sel_a = st.selectbox("유종 A (보유/위험 산지)", all_options_a, index=idx_a)
     with col_b:
-        sel_b = st.selectbox("유종 B (인도/안전 산지)", all_options_b, index=len(BENCHMARKS) + country_options.index("사우디아라비아") if "사우디아라비아" in country_options else 0)
+        idx_b = all_options_b.index("사우디아라비아 (Dubai)") if "사우디아라비아 (Dubai)" in all_options_b else 0
+        sel_b = st.selectbox("유종 B (인도/안전 산지)", all_options_b, index=idx_b)
 
     name_a, bench_a = parse_selection(sel_a)
     name_b, bench_b = parse_selection(sel_b)
