@@ -1,0 +1,10 @@
+# secrets - 절대 올리면 안 됨
+.streamlit/secrets.toml
+*.key
+.env
+
+# python 캐시
+__pycache__/
+*.pyc
+.venv/
+venv/
