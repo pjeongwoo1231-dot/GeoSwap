@@ -10,9 +10,7 @@ from src.engine import (
     BENCHMARKS,
     COUNTRY_BENCHMARK,
     GEO_DISCOUNT,
-    FREIGHT_FACTOR,
     HIGH_RISK_COUNTRIES,
-    adjusted_swap_rate,
     country_year_totals,
     hhi_by_year,
     high_risk_share_by_year,
@@ -24,8 +22,10 @@ from src.engine import (
 )
 
 DATA_SOURCE_FOOTER = (
-    "데이터: 산업통상부(한국석유공사) 국가별·유질별 원유수입 "
-    "[KOSIS, tblId TX_31801_A008] / 국제유가 [페트로넷]"
+    "데이터 출처 · 산업통상부(한국석유공사) 국가별·유질별 원유수입 "
+    "[KOSIS 국가통계포털, 통계표ID TX_31801_A008] · "
+    "국제 원유가격 Dubai/Brent/WTI/Oman [페트로넷] · "
+    "지정학 할인 가정값은 통상 Basis 기반(K-SURE 연동 예정)"
 )
 
 GRADE_LABELS = {"light": "경질유", "medium": "중(中)질유", "heavy": "중(重)질유"}
@@ -111,6 +111,7 @@ def tab_import_structure(countries):
     )
     fig_trend.update_yaxes(title_text="HHI (0–1)", secondary_y=False)
     fig_trend.update_yaxes(title_text="중동 의존도 (%)", secondary_y=True)
+    fig_trend.update_xaxes(dtick=1, tickformat="d")
     st.plotly_chart(fig_trend, use_container_width=True)
 
     fig_risk = go.Figure()
@@ -141,6 +142,7 @@ def tab_import_structure(countries):
         yaxis_title="비중 (%)",
         yaxis=dict(rangemode="tozero"),
     )
+    fig_risk.update_xaxes(dtick=1, tickformat="d")
     st.plotly_chart(fig_risk, use_container_width=True)
 
     st.subheader("국가별 연도별 수입량 (천 배럴)")
@@ -167,6 +169,7 @@ def tab_grade_composition(grades, grades_monthly):
         labels={"물량_천배럴": "천 배럴", "연도": "연도"},
         category_orders={"유질_한글": list(GRADE_LABELS.values())},
     )
+    fig_area.update_xaxes(dtick=1, tickformat="d")
     st.plotly_chart(fig_area, use_container_width=True)
 
     fig_share = px.area(
@@ -179,6 +182,7 @@ def tab_grade_composition(grades, grades_monthly):
         labels={"물량_천배럴": "비중 (%)", "연도": "연도"},
         category_orders={"유질_한글": list(GRADE_LABELS.values())},
     )
+    fig_share.update_xaxes(dtick=1, tickformat="d")
     st.plotly_chart(fig_share, use_container_width=True)
 
     if grades_monthly is not None:
@@ -256,8 +260,48 @@ def tab_swap_calculator(prices):
     name_a, bench_a = parse_selection(sel_a)
     name_b, bench_b = parse_selection(sel_b)
 
-    rate, period = latest_swap_rate(prices, bench_a, bench_b)
-    series = monthly_swap_series(prices, bench_a, bench_b)
+    st.subheader("지정학 할인율 직접 조정")
+    discount_a_default = float(GEO_DISCOUNT.get(name_a, 0.0))
+    discount_b_default = float(GEO_DISCOUNT.get(name_b, 0.0))
+    disc_col_a, disc_col_b = st.columns(2)
+    with disc_col_a:
+        discount_a = st.slider(
+            f"{name_a} 할인율",
+            0.0,
+            0.30,
+            discount_a_default,
+            0.01,
+            format="%.2f",
+        )
+    with disc_col_b:
+        discount_b = st.slider(
+            f"{name_b} 할인율",
+            0.0,
+            0.30,
+            discount_b_default,
+            0.01,
+            format="%.2f",
+        )
+
+    rate, period = latest_swap_rate(
+        prices,
+        bench_a,
+        bench_b,
+        country_a=name_a,
+        country_b=name_b,
+        geo_discount_a=discount_a,
+        geo_discount_b=discount_b,
+    )
+    series = monthly_swap_series(
+        prices,
+        bench_a,
+        bench_b,
+        country_a=name_a,
+        country_b=name_b,
+        geo_discount_a=discount_a,
+        geo_discount_b=discount_b,
+    )
+    latest_prices = prices.iloc[-1]
 
     st.markdown("---")
     st.metric(
@@ -268,34 +312,28 @@ def tab_swap_calculator(prices):
     st.markdown(
         f"### {name_a}({bench_a}) 1배럴 = **{name_b}({bench_b}) {rate:.4f}** 배럴"
     )
+    st.caption(
+        f"{bench_a} ${latest_prices[bench_a]:.1f} × (1 − {discount_a:.0%} 지정학할인) "
+        f"÷ {bench_b} ${latest_prices[bench_b]:.1f} × (1 − {discount_b:.0%}) = {rate:.2f}"
+    )
 
     fig_swap = px.line(
         series,
         x="연월",
         y="swap_rate",
-        title=f"{bench_a} → {bench_b} 월별 석유 환율",
+        title=f"{name_a}({bench_a}) → {name_b}({bench_b}) 월별 석유 환율",
         labels={"swap_rate": "스왑 비율", "연월": "연월"},
     )
     fig_swap.add_hline(y=1.0, line_dash="dash", line_color="gray", annotation_text="1:1")
     st.plotly_chart(fig_swap, use_container_width=True)
 
-    st.subheader("조정 항목 (v2 슬롯 데모)")
-    geo_a = st.slider(f"{name_a} 지정학 가중치 (geoDiscount)", -0.2, 0.2, float(GEO_DISCOUNT.get(name_a, 0.0)), 0.01)
-    geo_b = st.slider(f"{name_b} 지정학 가중치 (geoDiscount)", -0.2, 0.2, float(GEO_DISCOUNT.get(name_b, 0.0)), 0.01)
-    freight = st.slider("운임 조정 (freightFactor)", 0.8, 1.2, float(FREIGHT_FACTOR.get("default", 1.0)), 0.01)
-
-    latest_prices = prices.iloc[-1]
-    adj = adjusted_swap_rate(
-        latest_prices[bench_a],
-        latest_prices[bench_b],
-        geo_discount_a=geo_a,
-        geo_discount_b=geo_b,
-        freight_factor=freight,
-    )
-    st.info(
-        f"Adjusted Swap Rate = {adj:.4f}  "
-        f"(기본 {rate:.4f} × (1+{geo_a:.2f}−{geo_b:.2f}) × {freight:.2f})"
-    )
+    with st.expander("지정학 할인율 가정 근거"):
+        st.write(
+            "카자흐(CPC)·러시아(Urals)·베네수엘라(Merey)는 지정학·품질 요인으로 "
+            "벤치마크 대비 할인 거래되는 경우가 많습니다. 본 값은 통상 Basis 수준의 "
+            "조정 가능한 가정이며, 추후 한국무역보험공사(K-SURE) 국가위험도 및 "
+            "Argus/Platts 실측 Basis로 대체 가능합니다."
+        )
 
     st.markdown("---")
     st.markdown("#### 🚢 이 스왑으로 절감되는 운송거리/탄소")
@@ -371,7 +409,7 @@ def main():
     with tab5:
         tab_geopolitical_risk(countries)
 
-    st.markdown("---")
+    st.divider()
     footer()
 
 

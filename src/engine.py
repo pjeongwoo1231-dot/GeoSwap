@@ -50,8 +50,18 @@ COUNTRY_BENCHMARK: dict[str, str] = {
 HIGH_RISK_COUNTRIES = ["러시아", "카자흐스탄"]
 MIDDLE_EAST_CONTINENT = "중동"
 
-# TODO(v2): K-SURE country risk → geoDiscount per country
-GEO_DISCOUNT: dict[str, float] = {c: 0.0 for c in COUNTRY_BENCHMARK}
+# 벤치마크 대비 할인율(양수 = 그만큼 싸게 거래됨).
+# 실제 원유 Basis(CPC Blend, Urals, Merey 등)의 통상 수준을 반영한 조정 가능한 가정값.
+# TODO(v2): 한국무역보험공사(K-SURE) 국가위험도 / Argus·Platts 실측 Basis로 대체 예정.
+GEO_DISCOUNT: dict[str, float] = {
+    "카자흐스탄": 0.07,
+    "러시아": 0.25,
+    "베네수엘라": 0.25,
+    "나이지리아": 0.02,
+    "앙골라": 0.02,
+    "콩고": 0.03,
+    "가봉": 0.02,
+}
 GEO_DISCOUNT.update({b: 0.0 for b in BENCHMARKS})
 
 # TODO(v2): route distance hardcoding → freightFactor
@@ -69,6 +79,26 @@ def swap_rate(price_a: float, price_b: float) -> float:
     return price_a / price_b
 
 
+def effective_price(country: str, benchmark_price: float, geo_discount: float | None = None) -> float:
+    """Country crude effective price = benchmark price x (1 - geopolitical discount)."""
+    discount = GEO_DISCOUNT.get(country, 0.0) if geo_discount is None else geo_discount
+    return benchmark_price * (1 - discount)
+
+
+def country_swap_rate(
+    country_a: str,
+    bench_price_a: float,
+    country_b: str,
+    bench_price_b: float,
+    geo_discount_a: float | None = None,
+    geo_discount_b: float | None = None,
+) -> float:
+    """A 1 barrel = B how many barrels, including country-level geopolitical discounts."""
+    price_a = effective_price(country_a, bench_price_a, geo_discount_a)
+    price_b = effective_price(country_b, bench_price_b, geo_discount_b)
+    return swap_rate(price_a, price_b)
+
+
 def adjusted_swap_rate(
     price_a: float,
     price_b: float,
@@ -77,17 +107,33 @@ def adjusted_swap_rate(
     grade_adj: float = 1.0,
     freight_factor: float = 1.0,
 ) -> float:
-    """v2-adjusted swap rate; defaults match basic swap_rate."""
-    base = swap_rate(price_a, price_b)
-    return base * (1 + geo_discount_a - geo_discount_b) * grade_adj * freight_factor
+    """v2-adjusted swap rate using discounted effective prices."""
+    base = swap_rate(price_a * (1 - geo_discount_a), price_b * (1 - geo_discount_b))
+    return base * grade_adj * freight_factor
 
 
-def monthly_swap_series(prices: pd.DataFrame, bench_a: str, bench_b: str) -> pd.DataFrame:
+def monthly_swap_series(
+    prices: pd.DataFrame,
+    bench_a: str,
+    bench_b: str,
+    country_a: str | None = None,
+    country_b: str | None = None,
+    geo_discount_a: float | None = None,
+    geo_discount_b: float | None = None,
+) -> pd.DataFrame:
     """Monthly swap rate A→B time series."""
     out = prices[["연월", "연도", "월"]].copy()
-    out["swap_rate"] = prices[bench_a] / prices[bench_b]
+    name_a = country_a or bench_a
+    name_b = country_b or bench_b
+    discount_a = GEO_DISCOUNT.get(name_a, 0.0) if geo_discount_a is None else geo_discount_a
+    discount_b = GEO_DISCOUNT.get(name_b, 0.0) if geo_discount_b is None else geo_discount_b
+    out["swap_rate"] = (prices[bench_a] * (1 - discount_a)) / (prices[bench_b] * (1 - discount_b))
     out["bench_a"] = bench_a
     out["bench_b"] = bench_b
+    out["country_a"] = name_a
+    out["country_b"] = name_b
+    out["geo_discount_a"] = discount_a
+    out["geo_discount_b"] = discount_b
     return out
 
 
@@ -203,8 +249,24 @@ def import_volatility_risk(countries: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("변동계수", ascending=False)
 
 
-def latest_swap_rate(prices: pd.DataFrame, bench_a: str, bench_b: str) -> tuple[float, str]:
+def latest_swap_rate(
+    prices: pd.DataFrame,
+    bench_a: str,
+    bench_b: str,
+    country_a: str | None = None,
+    country_b: str | None = None,
+    geo_discount_a: float | None = None,
+    geo_discount_b: float | None = None,
+) -> tuple[float, str]:
     """Most recent monthly swap rate and period label."""
-    series = monthly_swap_series(prices, bench_a, bench_b)
+    series = monthly_swap_series(
+        prices,
+        bench_a,
+        bench_b,
+        country_a=country_a,
+        country_b=country_b,
+        geo_discount_a=geo_discount_a,
+        geo_discount_b=geo_discount_b,
+    )
     latest = series.iloc[-1]
     return float(latest["swap_rate"]), str(latest["연월"])
