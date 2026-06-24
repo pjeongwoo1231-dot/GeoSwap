@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 BENCHMARKS = ["Dubai", "Brent", "WTI", "Oman"]
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # Country → benchmark proxy for pricing (editable dict)
 COUNTRY_BENCHMARK: dict[str, str] = {
@@ -50,18 +53,23 @@ COUNTRY_BENCHMARK: dict[str, str] = {
 HIGH_RISK_COUNTRIES = ["러시아", "카자흐스탄"]
 MIDDLE_EAST_CONTINENT = "중동"
 
-# 벤치마크 대비 할인율(양수 = 그만큼 싸게 거래됨).
-# 실제 원유 Basis(CPC Blend, Urals, Merey 등)의 통상 수준을 반영한 조정 가능한 가정값.
-# TODO(v2): 한국무역보험공사(K-SURE) 국가위험도 / Argus·Platts 실측 Basis로 대체 예정.
-GEO_DISCOUNT: dict[str, float] = {
-    "카자흐스탄": 0.07,
-    "러시아": 0.25,
-    "베네수엘라": 0.25,
-    "나이지리아": 0.02,
-    "앙골라": 0.02,
-    "콩고": 0.03,
-    "가봉": 0.02,
+GRADE_TO_DISCOUNT: dict[int, float] = {
+    1: 0.00,
+    2: 0.02,
+    3: 0.04,
+    4: 0.06,
+    5: 0.09,
+    6: 0.14,
+    7: 0.22,
 }
+
+COUNTRY_ALIAS: dict[str, str | None] = {
+    "아랍에미리트": "아랍에미리트 연합",
+    "중립지대": None,
+}
+
+# Backward-compatible benchmark entries. Country-level discounts are resolved from K-SURE via geo_discount().
+GEO_DISCOUNT: dict[str, float] = {}
 GEO_DISCOUNT.update({b: 0.0 for b in BENCHMARKS})
 
 # TODO(v2): route distance hardcoding → freightFactor
@@ -72,6 +80,67 @@ FREIGHT_FACTOR: dict[str, float] = {
 }
 
 
+def _load_ksure_country_grades() -> pd.DataFrame:
+    """Load K-SURE country ratings used as the source for geopolitical discounts."""
+    df = pd.read_csv(DATA_DIR / "ksure_국가등급.csv", encoding="utf-8")
+    df["국가명"] = df["국가명"].astype(str).str.strip()
+    df["국가등급"] = pd.to_numeric(df["국가등급"], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["국가명", "국가등급"])
+    return df
+
+
+_KSURE_GRADES = _load_ksure_country_grades()
+
+
+def country_grade(country: str) -> int | None:
+    """Resolve an import-data country name to a K-SURE country rating."""
+    name = COUNTRY_ALIAS.get(country, country)
+    if name is None or name in BENCHMARKS:
+        return None
+
+    exact = _KSURE_GRADES[_KSURE_GRADES["국가명"] == name]
+    if len(exact):
+        return int(exact.iloc[0]["국가등급"])
+
+    names = _KSURE_GRADES["국가명"].astype(str)
+    part = _KSURE_GRADES[
+        names.str.contains(name, regex=False, na=False) | names.apply(lambda x: x in name)
+    ]
+    return int(part.iloc[0]["국가등급"]) if len(part) else None
+
+
+def geo_discount(country: str) -> float:
+    """Geopolitical discount from K-SURE rating. Missing ratings default to 0."""
+    grade = country_grade(country)
+    return GRADE_TO_DISCOUNT.get(grade, 0.0)
+
+
+def ksure_country_risk(countries: pd.DataFrame) -> pd.DataFrame:
+    """K-SURE ratings and derived discounts for crude import countries."""
+    rows: list[dict] = []
+    for country in sorted(countries["국가"].dropna().unique()):
+        grade = country_grade(country)
+        rows.append(
+            {
+                "국가": country,
+                "K-SURE_국가등급": grade,
+                "지정학_할인율": GRADE_TO_DISCOUNT.get(grade, 0.0),
+                "벤치마크": COUNTRY_BENCHMARK.get(country, "Brent"),
+                "최고위험": grade == 7,
+            }
+        )
+    return pd.DataFrame(rows).sort_values(
+        ["K-SURE_국가등급", "지정학_할인율", "국가"],
+        ascending=[False, False, True],
+        na_position="last",
+    )
+
+
+def load_oil_mining_risk() -> pd.DataFrame:
+    """Load sparse K-SURE oil/mining sector risk index for reference display."""
+    return pd.read_csv(DATA_DIR / "ksure_원유광업_위험지수.csv", encoding="utf-8")
+
+
 def swap_rate(price_a: float, price_b: float) -> float:
     """A 1 barrel = B how many barrels (value basis)."""
     if price_b == 0:
@@ -79,9 +148,9 @@ def swap_rate(price_a: float, price_b: float) -> float:
     return price_a / price_b
 
 
-def effective_price(country: str, benchmark_price: float, geo_discount: float | None = None) -> float:
+def effective_price(country: str, benchmark_price: float, discount_override: float | None = None) -> float:
     """Country crude effective price = benchmark price x (1 - geopolitical discount)."""
-    discount = GEO_DISCOUNT.get(country, 0.0) if geo_discount is None else geo_discount
+    discount = geo_discount(country) if discount_override is None else discount_override
     return benchmark_price * (1 - discount)
 
 
@@ -125,8 +194,8 @@ def monthly_swap_series(
     out = prices[["연월", "연도", "월"]].copy()
     name_a = country_a or bench_a
     name_b = country_b or bench_b
-    discount_a = GEO_DISCOUNT.get(name_a, 0.0) if geo_discount_a is None else geo_discount_a
-    discount_b = GEO_DISCOUNT.get(name_b, 0.0) if geo_discount_b is None else geo_discount_b
+    discount_a = geo_discount(name_a) if geo_discount_a is None else geo_discount_a
+    discount_b = geo_discount(name_b) if geo_discount_b is None else geo_discount_b
     out["swap_rate"] = (prices[bench_a] * (1 - discount_a)) / (prices[bench_b] * (1 - discount_b))
     out["bench_a"] = bench_a
     out["bench_b"] = bench_b

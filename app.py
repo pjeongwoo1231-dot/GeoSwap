@@ -9,23 +9,24 @@ from src.loaders import load_all
 from src.engine import (
     BENCHMARKS,
     COUNTRY_BENCHMARK,
-    GEO_DISCOUNT,
+    GRADE_TO_DISCOUNT,
     HIGH_RISK_COUNTRIES,
+    country_grade,
     country_year_totals,
+    geo_discount,
     hhi_by_year,
     high_risk_share_by_year,
-    import_volatility_risk,
+    ksure_country_risk,
     latest_swap_rate,
+    load_oil_mining_risk,
     middle_east_share_by_year,
     monthly_swap_series,
     resolve_benchmark,
 )
 
 DATA_SOURCE_FOOTER = (
-    "데이터 출처 · 산업통상부(한국석유공사) 국가별·유질별 원유수입 "
-    "[KOSIS 국가통계포털, 통계표ID TX_31801_A008] · "
-    "국제 원유가격 Dubai/Brent/WTI/Oman [페트로넷] · "
-    "지정학 할인 가정값은 통상 Basis 기반(K-SURE 연동 예정)"
+    "데이터 출처 · 한국석유공사[KOSIS TX_31801_A008] · 국제유가[페트로넷] · "
+    "한국무역보험공사 국가신용등급·원유광업 위험지수(지정학 할인 근거)"
 )
 
 GRADE_LABELS = {"light": "경질유", "medium": "중(中)질유", "heavy": "중(重)질유"}
@@ -261,8 +262,11 @@ def tab_swap_calculator(prices):
     name_b, bench_b = parse_selection(sel_b)
 
     st.subheader("지정학 할인율 직접 조정")
-    discount_a_default = float(GEO_DISCOUNT.get(name_a, 0.0))
-    discount_b_default = float(GEO_DISCOUNT.get(name_b, 0.0))
+    grade_a = country_grade(name_a)
+    grade_b = country_grade(name_b)
+    discount_a_default = float(geo_discount(name_a))
+    discount_b_basis = float(geo_discount(name_b))
+    discount_b_default = discount_b_basis
     disc_col_a, disc_col_b = st.columns(2)
     with disc_col_a:
         discount_a = st.slider(
@@ -312,8 +316,19 @@ def tab_swap_calculator(prices):
     st.markdown(
         f"### {name_a}({bench_a}) 1배럴 = **{name_b}({bench_b}) {rate:.4f}** 배럴"
     )
+    grade_a_text = (
+        f"{name_a}: K-SURE 국가등급 {grade_a} → 기준 할인 {geo_discount(name_a):.0%}, 적용 할인 {discount_a:.0%}"
+        if grade_a is not None
+        else f"{name_a}: K-SURE 등급 없음/벤치마크 직접 선택 → 지정학 할인 {discount_a:.0%}"
+    )
+    grade_b_text = (
+        f"{name_b}: K-SURE 국가등급 {grade_b} → 기준 할인 {discount_b_basis:.0%}, 적용 할인 {discount_b:.0%}"
+        if grade_b is not None
+        else f"{name_b}: K-SURE 등급 없음/벤치마크 직접 선택 → 지정학 할인 {discount_b:.0%}"
+    )
     st.caption(
-        f"{bench_a} ${latest_prices[bench_a]:.1f} × (1 − {discount_a:.0%} 지정학할인) "
+        f"{grade_a_text} · {grade_b_text}\n\n"
+        f"{bench_a} ${latest_prices[bench_a]:.1f} × (1 − {discount_a:.0%}) "
         f"÷ {bench_b} ${latest_prices[bench_b]:.1f} × (1 − {discount_b:.0%}) = {rate:.2f}"
     )
 
@@ -327,12 +342,12 @@ def tab_swap_calculator(prices):
     fig_swap.add_hline(y=1.0, line_dash="dash", line_color="gray", annotation_text="1:1")
     st.plotly_chart(fig_swap, use_container_width=True)
 
-    with st.expander("지정학 할인율 가정 근거"):
+    with st.expander("지정학 할인율 산출 근거"):
         st.write(
-            "카자흐(CPC)·러시아(Urals)·베네수엘라(Merey)는 지정학·품질 요인으로 "
-            "벤치마크 대비 할인 거래되는 경우가 많습니다. 본 값은 통상 Basis 수준의 "
-            "조정 가능한 가정이며, 추후 한국무역보험공사(K-SURE) 국가위험도 및 "
-            "Argus/Platts 실측 Basis로 대체 가능합니다."
+            "할인율은 한국무역보험공사(K-SURE) 국가신용등급(1~7)에 기반합니다. "
+            "등급별 할인은 1→0%, 2→2%, 3→4%, 4→6%, 5→9%, 6→14%, 7→22%이며, "
+            "계산기 기본값은 양쪽 국가의 K-SURE 등급 기반 할인율을 모두 자동 반영하며, "
+            "슬라이더로 시나리오 조정이 가능합니다."
         )
 
     st.markdown("---")
@@ -342,32 +357,42 @@ def tab_swap_calculator(prices):
 
 def tab_geopolitical_risk(countries):
     st.header("지정학 리스크")
-    st.warning(
-        "한국무역보험공사(K-SURE) 국가위험도 데이터 연동 예정 — "
-        "현재는 수입량 변동성 기반 임시 리스크 지표를 표시합니다."
-    )
+    st.success("K-SURE 국가위험도 연동 완료")
 
-    vol = import_volatility_risk(countries)
-    fig_vol = px.bar(
-        vol.head(15),
-        x="변동계수",
+    risk = ksure_country_risk(countries)
+    risk_graph = risk.dropna(subset=["K-SURE_국가등급"]).sort_values(
+        ["K-SURE_국가등급", "국가"], ascending=[True, True]
+    )
+    fig_ksure = px.bar(
+        risk_graph,
+        x="K-SURE_국가등급",
         y="국가",
-        color="고위험",
+        color="K-SURE_국가등급",
         orientation="h",
-        title="국가별 수입량 변동계수 (2020–2024, 임시 리스크)",
-        labels={"변동계수": "변동계수 (CV)", "국가": ""},
-        color_discrete_map={True: "crimson", False: "steelblue"},
+        text="K-SURE_국가등급",
+        title="국가별 K-SURE 국가등급 (수입국 기준)",
+        labels={"K-SURE_국가등급": "국가등급", "국가": ""},
+        color_continuous_scale=["#2e7d32", "#f9a825", "#c62828"],
+        range_color=[1, 7],
     )
-    st.plotly_chart(fig_vol, use_container_width=True)
-
-    risk_ts = high_risk_share_by_year(countries)
-    st.subheader("고위험국 수입 비중 상세")
-    st.dataframe(risk_ts, use_container_width=True)
-
-    detail = countries[countries["국가"].isin(HIGH_RISK_COUNTRIES)].pivot_table(
-        index="국가", columns="연도", values="물량_천배럴", fill_value=0
+    fig_ksure.update_yaxes(
+        categoryorder="array",
+        categoryarray=risk_graph["국가"].tolist(),
     )
-    st.dataframe(detail, use_container_width=True)
+    fig_ksure.update_xaxes(dtick=1, tickformat="d", range=[0, 7.4])
+    fig_ksure.update_layout(height=max(520, len(risk_graph) * 24), coloraxis_showscale=False)
+    st.plotly_chart(fig_ksure, use_container_width=True)
+
+    st.subheader("등급→할인율 매핑")
+    mapping_rows = [
+        {"K-SURE 국가등급": grade, "지정학 할인율": f"{discount:.0%}"}
+        for grade, discount in GRADE_TO_DISCOUNT.items()
+    ]
+    st.dataframe(mapping_rows, use_container_width=True)
+
+    st.subheader("원유광업 업종 위험지수 참고")
+    st.caption("K-SURE는 원유광업 업종 특화 위험지수도 제공 — 향후 업종 특화 모델로 확장 가능")
+    st.dataframe(load_oil_mining_risk(), use_container_width=True)
 
 
 def main():
