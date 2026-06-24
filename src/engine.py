@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,16 +11,16 @@ import pandas as pd
 BENCHMARKS = ["Dubai", "Brent", "WTI", "Oman"]
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-# Country → benchmark proxy for pricing (editable dict)
+# Country -> benchmark proxy for pricing (editable dict)
 COUNTRY_BENCHMARK: dict[str, str] = {
-    # Americas → WTI
+    # Americas -> WTI
     "미국": "WTI",
     "캐나다": "WTI",
     "멕시코": "WTI",
     "브라질": "WTI",
     "에콰도르": "WTI",
     "콜롬비아": "WTI",
-    # Middle East → Dubai/Oman
+    # Middle East -> Dubai/Oman
     "사우디아라비아": "Dubai",
     "아랍에미리트": "Dubai",
     "쿠웨이트": "Dubai",
@@ -27,7 +28,7 @@ COUNTRY_BENCHMARK: dict[str, str] = {
     "카타르": "Dubai",
     "오만": "Oman",
     "중립지대": "Dubai",
-    # Europe / Africa / CIS → Brent
+    # Europe / Africa / CIS -> Brent
     "노르웨이": "Brent",
     "영국": "Brent",
     "알제리": "Brent",
@@ -64,6 +65,41 @@ GRADE_TO_DISCOUNT: dict[int, float] = {
     7: 0.22,
 }
 
+# Phase B model constants. Keep these top-level for easy tuning.
+Q_API = 0.007
+Q_S = 0.02
+API_REF = 31.0
+S_REF = 2.0
+ALPHA = 0.5
+
+GPR_REGION = {
+    "사우디아라비아": "MiddleEast",
+    "아랍에미리트": "MiddleEast",
+    "쿠웨이트": "MiddleEast",
+    "이라크": "MiddleEast",
+    "카타르": "MiddleEast",
+    "오만": "MiddleEast",
+    "중립지대": "MiddleEast",
+    "러시아": "Russia",
+    "카자흐스탄": "Russia",  # CPC pipeline depends on Russian territory
+    "베네수엘라": "Venezuela",
+    "에콰도르": "Americas",
+    "콜롬비아": "Americas",
+    "미국": "Americas",
+    "캐나다": "Americas",
+    "멕시코": "Americas",
+    "브라질": "Americas",
+    "나이지리아": "Africa",
+    "앙골라": "Africa",
+    "가봉": "Africa",
+    "콩고": "Africa",
+    "적도기니": "Africa",
+    "알제리": "Africa",
+    "카메룬": "Africa",
+    "노르웨이": "NorthSea",
+    "영국": "NorthSea",
+}
+
 COUNTRY_ALIAS: dict[str, str | None] = {
     "아랍에미리트": "아랍에미리트 연합",
     "중립지대": None,
@@ -73,12 +109,32 @@ COUNTRY_ALIAS: dict[str, str | None] = {
 GEO_DISCOUNT: dict[str, float] = {}
 GEO_DISCOUNT.update({b: 0.0 for b in BENCHMARKS})
 
-# TODO(v2): route distance hardcoding → freightFactor
+# TODO(v2): route distance hardcoding -> freightFactor
 FREIGHT_FACTOR: dict[str, float] = {
     "카자흐스탄→한국": 1.0,
     "중동→한국": 1.0,
     "default": 1.0,
 }
+
+
+def _read_csv_utf8(path: Path) -> pd.DataFrame:
+    """Read UTF-8 CSV and strip duplicate BOM markers."""
+    raw_bytes = path.read_bytes()
+    while raw_bytes.startswith(b"\xef\xbb\xbf"):
+        raw_bytes = raw_bytes[3:]
+    return pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8")
+
+
+def _country_name_variants(country: str) -> list[str]:
+    """Return exact and alias country labels for lookup."""
+    variants = [country]
+    alias = COUNTRY_ALIAS.get(country)
+    if alias and alias not in variants:
+        variants.append(alias)
+    for source, target in COUNTRY_ALIAS.items():
+        if target == country and source not in variants:
+            variants.append(source)
+    return variants
 
 
 @lru_cache(maxsize=1)
@@ -88,11 +144,83 @@ def _load_ksure_country_grades() -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=["국가명", "국가등급", "평가일자"])
 
-    df = pd.read_csv(path, encoding="utf-8")
+    df = _read_csv_utf8(path)
     df["국가명"] = df["국가명"].astype(str).str.strip()
     df["국가등급"] = pd.to_numeric(df["국가등급"], errors="coerce").astype("Int64")
     df = df.dropna(subset=["국가명", "국가등급"])
     return df
+
+
+@lru_cache(maxsize=1)
+def _load_oil_quality() -> pd.DataFrame:
+    """Load crude API / sulfur quality reference data."""
+    path = DATA_DIR / "원유품질_API황.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=["국가명", "API_비중", "황함량_pct", "표본물량", "출처"])
+
+    df = _read_csv_utf8(path)
+    df["국가명"] = df["국가명"].astype(str).str.strip()
+    for col in ["API_비중", "황함량_pct", "표본물량"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["국가명"]).reset_index(drop=True)
+
+
+@lru_cache(maxsize=1)
+def _load_gpr_oil_region_monthly() -> pd.DataFrame:
+    """Load monthly oil geopolitical risk indices by region."""
+    path = DATA_DIR / "gpr_oil_region_monthly.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=["Date", "연월"])
+
+    df = _read_csv_utf8(path)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).reset_index(drop=True)
+    df["연도"] = df["Date"].dt.year.astype("Int64")
+    df["월"] = df["Date"].dt.month.astype("Int64")
+    df["연월"] = df["Date"].dt.strftime("%Y-%m")
+    for col in [c for c in df.columns if c.startswith("GPR_OIL")]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+@lru_cache(maxsize=1)
+def _quality_row(country: str) -> pd.Series | None:
+    """Resolve a country to one row of API/sulfur quality data."""
+    df = _load_oil_quality()
+    if df.empty:
+        return None
+
+    for candidate in _country_name_variants(country):
+        exact = df[df["국가명"] == candidate]
+        if len(exact):
+            return exact.iloc[0]
+
+    for candidate in _country_name_variants(country):
+        part = df[df["국가명"].astype(str).str.contains(candidate, regex=False, na=False)]
+        if len(part):
+            return part.iloc[0]
+
+    return None
+
+
+@lru_cache(maxsize=1)
+def _gpr_region_for_country(country: str) -> str | None:
+    """Resolve a country name to a GPR region column suffix."""
+    for candidate in _country_name_variants(country):
+        region = GPR_REGION.get(candidate)
+        if region:
+            return region
+    return None
+
+
+def _month_key(value: str | pd.Timestamp | None) -> str | None:
+    """Normalize a value to YYYY-MM for monthly lookups."""
+    if value is None:
+        return None
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.strftime("%Y-%m")
 
 
 def country_grade(country: str) -> int | None:
@@ -105,21 +233,75 @@ def country_grade(country: str) -> int | None:
     if ksure_grades.empty:
         return None
 
-    exact = ksure_grades[ksure_grades["국가명"] == name]
-    if len(exact):
-        return int(exact.iloc[0]["국가등급"])
+    variants = _country_name_variants(name)
+    for candidate in variants:
+        exact = ksure_grades[ksure_grades["국가명"] == candidate]
+        if len(exact):
+            return int(exact.iloc[0]["국가등급"])
 
     names = ksure_grades["국가명"].astype(str)
-    part = ksure_grades[
-        names.str.contains(name, regex=False, na=False) | names.apply(lambda x: x in name)
-    ]
-    return int(part.iloc[0]["국가등급"]) if len(part) else None
+    for candidate in variants:
+        part = ksure_grades[
+            names.str.contains(candidate, regex=False, na=False) | names.apply(lambda x: x in candidate)
+        ]
+        if len(part):
+            return int(part.iloc[0]["국가등급"])
+
+    return None
 
 
-def geo_discount(country: str) -> float:
-    """Geopolitical discount from K-SURE rating. Missing ratings default to 0."""
+def quality_adj(country: str) -> float:
+    """Static crude quality adjustment from API and sulfur content."""
+    row = _quality_row(country)
+    if row is None:
+        return 1.0
+    api = float(row["API_비중"])
+    sulfur = float(row["황함량_pct"])
+    return 1 + Q_API * (api - API_REF) - Q_S * (sulfur - S_REF)
+
+
+def gpr_stress(region: str | None, t: str | pd.Timestamp | None) -> float:
+    """Normalize GPR stress so median->0 and p90->1, clipped to [0, 2]."""
+    if region is None:
+        return 0.0
+
+    df = _load_gpr_oil_region_monthly()
+    col = f"GPR_OIL_{region}"
+    if df.empty or col not in df.columns:
+        return 0.0
+
+    month_key = _month_key(t)
+    if month_key is None:
+        return 0.0
+
+    series = pd.to_numeric(df[col], errors="coerce").dropna()
+    if series.empty:
+        return 0.0
+
+    value_rows = df.loc[df["연월"] == month_key, col].dropna()
+    if value_rows.empty:
+        return 0.0
+
+    value = float(value_rows.iloc[0])
+    median = float(series.median())
+    p90 = float(series.quantile(0.9))
+    if p90 <= median:
+        return 0.0
+
+    stress = (value - median) / (p90 - median)
+    return float(max(0.0, min(2.0, stress)))
+
+
+def geo_discount(country: str, t: str | pd.Timestamp | None = None) -> float:
+    """Geopolitical discount from K-SURE rating and optional GPR shock."""
     grade = country_grade(country)
-    return GRADE_TO_DISCOUNT.get(grade, 0.0)
+    base = GRADE_TO_DISCOUNT.get(grade, 0.0)
+    if t is None:
+        return base
+
+    region = _gpr_region_for_country(country)
+    stress = gpr_stress(region, t) if region else 0.0
+    return base * (1 + ALPHA * stress)
 
 
 def ksure_country_risk(countries: pd.DataFrame) -> pd.DataFrame:
@@ -158,10 +340,17 @@ def swap_rate(price_a: float, price_b: float) -> float:
     return price_a / price_b
 
 
-def effective_price(country: str, benchmark_price: float, discount_override: float | None = None) -> float:
-    """Country crude effective price = benchmark price x (1 - geopolitical discount)."""
-    discount = geo_discount(country) if discount_override is None else discount_override
-    return benchmark_price * (1 - discount)
+def effective_price(
+    country: str,
+    benchmark_price: float,
+    t: str | pd.Timestamp | None = None,
+    quality_override: float | None = None,
+    geo_discount_override: float | None = None,
+) -> float:
+    """Country crude effective price = benchmark price x quality x (1 - discount)."""
+    quality = quality_adj(country) if quality_override is None else quality_override
+    discount = geo_discount(country, t) if geo_discount_override is None else geo_discount_override
+    return benchmark_price * quality * (1 - discount)
 
 
 def country_swap_rate(
@@ -169,12 +358,13 @@ def country_swap_rate(
     bench_price_a: float,
     country_b: str,
     bench_price_b: float,
+    t: str | pd.Timestamp | None = None,
     geo_discount_a: float | None = None,
     geo_discount_b: float | None = None,
 ) -> float:
-    """A 1 barrel = B how many barrels, including country-level geopolitical discounts."""
-    price_a = effective_price(country_a, bench_price_a, geo_discount_a)
-    price_b = effective_price(country_b, bench_price_b, geo_discount_b)
+    """A 1 barrel = B how many barrels, including quality and geopolitical adjustments."""
+    price_a = effective_price(country_a, bench_price_a, t=t, geo_discount_override=geo_discount_a)
+    price_b = effective_price(country_b, bench_price_b, t=t, geo_discount_override=geo_discount_b)
     return swap_rate(price_a, price_b)
 
 
@@ -185,9 +375,14 @@ def adjusted_swap_rate(
     geo_discount_b: float = 0.0,
     grade_adj: float = 1.0,
     freight_factor: float = 1.0,
+    quality_a: float = 1.0,
+    quality_b: float = 1.0,
 ) -> float:
     """v2-adjusted swap rate using discounted effective prices."""
-    base = swap_rate(price_a * (1 - geo_discount_a), price_b * (1 - geo_discount_b))
+    base = swap_rate(
+        price_a * quality_a * (1 - geo_discount_a),
+        price_b * quality_b * (1 - geo_discount_b),
+    )
     return base * grade_adj * freight_factor
 
 
@@ -200,19 +395,33 @@ def monthly_swap_series(
     geo_discount_a: float | None = None,
     geo_discount_b: float | None = None,
 ) -> pd.DataFrame:
-    """Monthly swap rate A→B time series."""
+    """Monthly swap rate A->B time series."""
     out = prices[["연월", "연도", "월"]].copy()
     name_a = country_a or bench_a
     name_b = country_b or bench_b
-    discount_a = geo_discount(name_a) if geo_discount_a is None else geo_discount_a
-    discount_b = geo_discount(name_b) if geo_discount_b is None else geo_discount_b
-    out["swap_rate"] = (prices[bench_a] * (1 - discount_a)) / (prices[bench_b] * (1 - discount_b))
+    quality_a = quality_adj(name_a)
+    quality_b = quality_adj(name_b)
+
+    if geo_discount_a is None:
+        discount_a = [geo_discount(name_a, month) for month in out["연월"]]
+    else:
+        discount_a = [geo_discount_a] * len(out)
+    if geo_discount_b is None:
+        discount_b = [geo_discount(name_b, month) for month in out["연월"]]
+    else:
+        discount_b = [geo_discount_b] * len(out)
+
+    out["quality_adj_a"] = quality_a
+    out["quality_adj_b"] = quality_b
+    out["geo_discount_a"] = discount_a
+    out["geo_discount_b"] = discount_b
+    out["effective_price_a"] = prices[bench_a] * quality_a * (1 - out["geo_discount_a"])
+    out["effective_price_b"] = prices[bench_b] * quality_b * (1 - out["geo_discount_b"])
+    out["swap_rate"] = out["effective_price_a"] / out["effective_price_b"]
     out["bench_a"] = bench_a
     out["bench_b"] = bench_b
     out["country_a"] = name_a
     out["country_b"] = name_b
-    out["geo_discount_a"] = discount_a
-    out["geo_discount_b"] = discount_b
     return out
 
 
@@ -272,7 +481,7 @@ def country_year_totals(countries: pd.DataFrame, year: int) -> pd.DataFrame:
 
 
 def hhi_by_year(countries: pd.DataFrame) -> pd.DataFrame:
-    """Herfindahl-Hirschman Index by year (share as proportion, 0–1 scale)."""
+    """Herfindahl-Hirschman Index by year (share as proportion, 0-1 scale)."""
     rows: list[dict] = []
     for year in sorted(countries["연도"].unique()):
         df = country_year_totals(countries, year)
@@ -306,7 +515,7 @@ def high_risk_share_by_year(countries: pd.DataFrame) -> pd.DataFrame:
 
 
 def import_volatility_risk(countries: pd.DataFrame) -> pd.DataFrame:
-    """Temporary risk proxy: coefficient of variation of import volumes (2020–2024)."""
+    """Temporary risk proxy: coefficient of variation of import volumes (2020-2024)."""
     pivot = countries.pivot_table(
         index="국가", columns="연도", values="물량_천배럴", aggfunc="sum", fill_value=0
     )
@@ -336,6 +545,7 @@ def latest_swap_rate(
     country_b: str | None = None,
     geo_discount_a: float | None = None,
     geo_discount_b: float | None = None,
+    month: str | pd.Timestamp | None = None,
 ) -> tuple[float, str]:
     """Most recent monthly swap rate and period label."""
     series = monthly_swap_series(
@@ -347,5 +557,12 @@ def latest_swap_rate(
         geo_discount_a=geo_discount_a,
         geo_discount_b=geo_discount_b,
     )
+    if month is not None:
+        month_key = _month_key(month)
+        if month_key is not None:
+            filtered = series[series["연월"] == month_key]
+            if len(filtered):
+                latest = filtered.iloc[-1]
+                return float(latest["swap_rate"]), str(latest["연월"])
     latest = series.iloc[-1]
     return float(latest["swap_rate"]), str(latest["연월"])

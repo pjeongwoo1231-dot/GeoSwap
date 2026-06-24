@@ -1,5 +1,6 @@
 """Hana Geo-Swap — Petroleum Swap Rate Dashboard."""
 
+import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
@@ -21,6 +22,7 @@ from src.engine import (
     load_oil_mining_risk,
     middle_east_share_by_year,
     monthly_swap_series,
+    quality_adj,
     resolve_benchmark,
 )
 
@@ -233,6 +235,139 @@ def tab_oil_prices(prices):
     st.dataframe(annual.style.format({b: "{:.2f}" for b in BENCHMARKS}), use_container_width=True)
 
 
+def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
+    st.header("🔍 심층분석")
+    st.caption("독립된 두 공공데이터가 같은 사건을 어떻게 보여주는지 확인하는 탭입니다.")
+    st.caption(f"K-SURE 표본 {len(ksure_grades):,}건 · 품질 표본 {len(oil_quality):,}건")
+
+    years = sorted(countries["연도"].unique())
+    year = st.slider("버블 기준 연도", min_value=min(years), max_value=max(years), value=max(years))
+
+    # 1) GPR ↔ 수입 상관
+    gpr_df = gpr_region_monthly[["Date", "GPR_OIL_Russia"]].copy()
+    rus_import = (
+        countries[countries["국가"] == "러시아"]
+        .groupby("연도", as_index=False)["물량_천배럴"]
+        .sum()
+        .rename(columns={"물량_천배럴": "러시아_수입량"})
+    )
+    rus_import["Date"] = pd.to_datetime(rus_import["연도"].astype(str) + "-12-31")
+
+    fig_corr = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_corr.add_trace(
+        go.Scatter(
+            x=gpr_df["Date"],
+            y=gpr_df["GPR_OIL_Russia"],
+            mode="lines",
+            name="GPR_OIL_Russia (월별)",
+            line=dict(color="#1f77b4", width=2.5),
+        ),
+        secondary_y=False,
+    )
+    fig_corr.add_trace(
+        go.Scatter(
+            x=rus_import["Date"],
+            y=rus_import["러시아_수입량"],
+            mode="lines+markers",
+            name="한국 러시아 원유 수입량 (연별)",
+            line=dict(color="crimson", width=3, dash="dot"),
+            marker=dict(size=8),
+        ),
+        secondary_y=True,
+    )
+    spike_row = gpr_df.loc[gpr_df["Date"] == pd.Timestamp("2022-03-01")]
+    if not spike_row.empty and not rus_import.empty:
+        spike_y = float(spike_row.iloc[0]["GPR_OIL_Russia"])
+        import_2022 = rus_import.loc[rus_import["연도"] == 2022, "러시아_수입량"]
+        if not import_2022.empty:
+            fig_corr.add_annotation(
+                x=pd.Timestamp("2022-03-01"),
+                y=spike_y,
+                text="2022-03 GPR 급등",
+                showarrow=True,
+                arrowhead=2,
+                ax=25,
+                ay=-35,
+                font=dict(color="#1f77b4"),
+            )
+            fig_corr.add_annotation(
+                x=pd.Timestamp("2022-12-31"),
+                y=float(import_2022.iloc[0]),
+                text="러시아 수입 절벽",
+                showarrow=True,
+                arrowhead=2,
+                ax=30,
+                ay=-35,
+                font=dict(color="crimson"),
+            )
+    fig_corr.update_layout(
+        title="GPR ↔ 러시아 원유 수입 상관",
+        xaxis_title="시점",
+        legend=dict(orientation="h", y=-0.2),
+    )
+    fig_corr.update_yaxes(title_text="GPR_OIL_Russia", secondary_y=False)
+    fig_corr.update_yaxes(title_text="한국 러시아 원유 수입량 (천 배럴)", secondary_y=True)
+    st.plotly_chart(fig_corr, use_container_width=True)
+    st.caption("독립된 두 공공데이터가 같은 사건을 증명: 2022-03 지정학 충격과 이후 수입 급감.")
+
+    # 2) 품질-지정학 사분면
+    import_year = countries[countries["연도"] == year].groupby("국가", as_index=False)["물량_천배럴"].sum()
+    quality = oil_quality.copy()
+    quality["K-SURE_국가등급"] = quality["국가명"].map(country_grade)
+    quality = quality.merge(import_year, left_on="국가명", right_on="국가", how="left")
+    quality["물량_천배럴"] = quality["물량_천배럴"].fillna(0)
+    quality = quality.dropna(subset=["API_비중", "K-SURE_국가등급"]).copy()
+
+    fig_quad = px.scatter(
+        quality,
+        x="API_비중",
+        y="K-SURE_국가등급",
+        size="물량_천배럴",
+        color="황함량_pct",
+        hover_name="국가명",
+        hover_data={"API_비중": ":.1f", "황함량_pct": ":.2f", "K-SURE_국가등급": True, "물량_천배럴": ":,.0f"},
+        size_max=38,
+        title=f"품질-지정학 사분면 (버블={year}년 수입량)",
+        labels={"API_비중": "API", "K-SURE_국가등급": "K-SURE 등급", "황함량_pct": "황함량(%)", "물량_천배럴": "수입량"},
+        color_continuous_scale="Viridis",
+    )
+    kaz = quality[quality["국가명"] == "카자흐스탄"]
+    if not kaz.empty:
+        row = kaz.iloc[0]
+        fig_quad.add_annotation(
+            x=float(row["API_비중"]),
+            y=float(row["K-SURE_국가등급"]),
+            text="고품질인데 지정학으로 저평가<br>= 스왑 차익 기회",
+            showarrow=True,
+            arrowhead=2,
+            ax=30,
+            ay=-35,
+            bgcolor="rgba(255,255,255,0.85)",
+            font=dict(color="black"),
+        )
+        fig_quad.add_trace(
+            go.Scatter(
+                x=[float(row["API_비중"])],
+                y=[float(row["K-SURE_국가등급"])],
+                mode="markers",
+                marker=dict(size=22, color="red", symbol="x"),
+                name="카자흐스탄 강조",
+            )
+        )
+    fig_quad.update_layout(
+        xaxis_title="API (높을수록 경질)",
+        yaxis_title="K-SURE 등급 (높을수록 위험)",
+        coloraxis_colorbar_title="황함량(%)",
+    )
+    st.plotly_chart(fig_quad, use_container_width=True)
+
+    with st.expander("해석 메모"):
+        st.write(
+            "카자흐스탄은 API가 높아 품질 프리미엄이 가능하지만, K-SURE 등급과 러시아 경유 리스크 때문에 "
+            "시장에서는 저평가되기 쉽습니다. 이런 괴리가 스왑 차익의 출발점입니다."
+        )
+
+
 def tab_swap_calculator(prices):
     st.header("⭐ 석유 환율 계산기")
     st.markdown(
@@ -261,11 +396,19 @@ def tab_swap_calculator(prices):
     name_a, bench_a = parse_selection(sel_a)
     name_b, bench_b = parse_selection(sel_b)
 
+    month_options = prices["연월"].dropna().sort_values().unique().tolist()
+    selected_month = st.select_slider(
+        "기준 월",
+        options=month_options,
+        value=month_options[-1],
+    )
+    selected_row = prices.loc[prices["연월"] == selected_month].iloc[-1]
+
     st.subheader("지정학 할인율 직접 조정")
     grade_a = country_grade(name_a)
     grade_b = country_grade(name_b)
-    discount_a_default = float(geo_discount(name_a))
-    discount_b_basis = float(geo_discount(name_b))
+    discount_a_basis = float(geo_discount(name_a, selected_month))
+    discount_b_basis = float(geo_discount(name_b, selected_month))
     discount_b_default = discount_b_basis
     disc_col_a, disc_col_b = st.columns(2)
     with disc_col_a:
@@ -273,7 +416,7 @@ def tab_swap_calculator(prices):
             f"{name_a} 할인율",
             0.0,
             0.30,
-            discount_a_default,
+            discount_a_basis,
             0.01,
             format="%.2f",
         )
@@ -295,6 +438,7 @@ def tab_swap_calculator(prices):
         country_b=name_b,
         geo_discount_a=discount_a,
         geo_discount_b=discount_b,
+        month=selected_month,
     )
     series = monthly_swap_series(
         prices,
@@ -305,7 +449,10 @@ def tab_swap_calculator(prices):
         geo_discount_a=discount_a,
         geo_discount_b=discount_b,
     )
-    latest_prices = prices.iloc[-1]
+    quality_a = 1.0 if name_a in BENCHMARKS else float(quality_adj(name_a))
+    quality_b = 1.0 if name_b in BENCHMARKS else float(quality_adj(name_b))
+    effective_a = float(selected_row[bench_a]) * quality_a * (1 - discount_a)
+    effective_b = float(selected_row[bench_b]) * quality_b * (1 - discount_b)
 
     st.markdown("---")
     st.metric(
@@ -316,20 +463,36 @@ def tab_swap_calculator(prices):
     st.markdown(
         f"### {name_a}({bench_a}) 1배럴 = **{name_b}({bench_b}) {rate:.4f}** 배럴"
     )
-    grade_a_text = (
-        f"{name_a}: K-SURE 국가등급 {grade_a} → 기준 할인 {geo_discount(name_a):.0%}, 적용 할인 {discount_a:.0%}"
-        if grade_a is not None
-        else f"{name_a}: K-SURE 등급 없음/벤치마크 직접 선택 → 지정학 할인 {discount_a:.0%}"
-    )
-    grade_b_text = (
-        f"{name_b}: K-SURE 국가등급 {grade_b} → 기준 할인 {discount_b_basis:.0%}, 적용 할인 {discount_b:.0%}"
-        if grade_b is not None
-        else f"{name_b}: K-SURE 등급 없음/벤치마크 직접 선택 → 지정학 할인 {discount_b:.0%}"
-    )
+
+    col_break_a, col_break_b = st.columns(2)
+    with col_break_a:
+        st.markdown("#### A 분해")
+        st.write(f"P_ref(Dubai) = ${float(selected_row[bench_a]):.2f}")
+        st.write(f"품질보정 = {quality_a:.3f}")
+        if grade_a is not None:
+            st.write(
+                f"지정학할인 = {discount_a:.1%} "
+                f"(기본 {discount_a_basis:.1%} = K-SURE {grade_a}등급, 시나리오 반영)"
+            )
+        else:
+            st.write(f"지정학할인 = {discount_a:.1%} (벤치마크 직접 선택)")
+        st.write(f"유효가격 = ${effective_a:.2f}")
+    with col_break_b:
+        st.markdown("#### B 분해")
+        st.write(f"P_ref(Dubai) = ${float(selected_row[bench_b]):.2f}")
+        st.write(f"품질보정 = {quality_b:.3f}")
+        if grade_b is not None:
+            st.write(
+                f"지정학할인 = {discount_b:.1%} "
+                f"(기본 {discount_b_basis:.1%} = K-SURE {grade_b}등급, 시나리오 반영)"
+            )
+        else:
+            st.write(f"지정학할인 = {discount_b:.1%} (벤치마크 직접 선택)")
+        st.write(f"유효가격 = ${effective_b:.2f}")
+
     st.caption(
-        f"{grade_a_text} · {grade_b_text}\n\n"
-        f"{bench_a} ${latest_prices[bench_a]:.1f} × (1 − {discount_a:.0%}) "
-        f"÷ {bench_b} ${latest_prices[bench_b]:.1f} × (1 − {discount_b:.0%}) = {rate:.2f}"
+        f"{bench_a} ${float(selected_row[bench_a]):.2f} × {quality_a:.3f} × (1 − {discount_a:.1%}) "
+        f"÷ {bench_b} ${float(selected_row[bench_b]):.2f} × {quality_b:.3f} × (1 − {discount_b:.1%}) = {rate:.4f}"
     )
 
     fig_swap = px.line(
@@ -412,13 +575,17 @@ def main():
     grades = data["grades"]
     grades_monthly = data["grades_monthly"]
     prices = data["prices"]
+    gpr_region_monthly = data["gpr_region_monthly"]
+    oil_quality = data["oil_quality"]
+    ksure_grades = data["ksure_grades"]
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         [
             "📊 원유 수입 구조",
             "🛢️ 유질 구성",
             "💵 국제유가 & 스프레드",
             "⭐ 석유 환율 계산기",
+            "🔍 심층분석",
             "🌍 지정학 리스크",
         ]
     )
@@ -432,6 +599,8 @@ def main():
     with tab4:
         tab_swap_calculator(prices)
     with tab5:
+        tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades)
+    with tab6:
         tab_geopolitical_risk(countries)
 
     st.divider()
