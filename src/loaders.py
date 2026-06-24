@@ -6,6 +6,22 @@ from pathlib import Path
 
 import pandas as pd
 
+try:
+    import streamlit as st
+except ModuleNotFoundError:  # pragma: no cover - fallback for non-Streamlit environments
+    class _StreamlitFallback:
+        @staticmethod
+        def cache_data(*args, **kwargs):
+            if args and callable(args[0]) and not kwargs:
+                return args[0]
+
+            def decorator(func):
+                return func
+
+            return decorator
+
+    st = _StreamlitFallback()
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 GRADE_MAP = {
@@ -31,6 +47,72 @@ def _extract_year_col(name: str) -> int | None:
     if name.startswith("Y") and " " in name:
         return int(name.split()[0][1:])
     return None
+
+
+@st.cache_data(show_spinner=False)
+def load_ksure_country_grades(path: Path | None = None) -> pd.DataFrame:
+    """Load K-SURE country grades (1=lowest risk, 7=highest risk)."""
+    path = path or DATA_DIR / "ksure_국가등급.csv"
+    df = _read_csv_utf8(path)
+    df["국가명"] = df["국가명"].astype(str).str.strip()
+    df["국가등급"] = pd.to_numeric(df["국가등급"], errors="coerce").astype("Int64")
+    df["평가일자"] = pd.to_datetime(df["평가일자"], errors="coerce").dt.date
+    return df.dropna(subset=["국가명", "국가등급"]).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_oil_quality(path: Path | None = None) -> pd.DataFrame:
+    """Load crude oil API and sulfur quality reference data."""
+    path = path or DATA_DIR / "원유품질_API황.csv"
+    df = _read_csv_utf8(path)
+    df["국가명"] = df["국가명"].astype(str).str.strip()
+    for col in ["API_비중", "황함량_pct", "표본물량"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["국가명"]).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_eu_ets_carbon_prices(path: Path | None = None) -> pd.DataFrame:
+    """Load EU ETS carbon prices by year."""
+    path = path or DATA_DIR / "gas_EU_ETS_탄소가격.csv"
+    df = _read_csv_utf8(path)
+    df = df.rename(
+        columns={
+            "최저 가격(Euro)": "최저(Euro)",
+            "최대 가격(Euro)": "최대(Euro)",
+            "연평균 가격(Euro)": "연평균(Euro)",
+        }
+    )
+    df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
+    for col in ["최저(Euro)", "최대(Euro)", "연평균(Euro)"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["연도"]).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_gpr_oil_region_monthly(path: Path | None = None) -> pd.DataFrame:
+    """Load monthly oil geopolitical risk indices by region."""
+    path = path or DATA_DIR / "gpr_oil_region_monthly.csv"
+    df = _read_csv_utf8(path)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).reset_index(drop=True)
+    df["연도"] = df["Date"].dt.year.astype("Int64")
+    df["월"] = df["Date"].dt.month.astype("Int64")
+    df["연월"] = df["Date"].dt.strftime("%Y-%m")
+    for col in [c for c in df.columns if c.startswith("GPR_OIL")]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_ksure_oil_mining_risk(path: Path | None = None) -> pd.DataFrame:
+    """Load the sparse K-SURE oil/mining sector risk reference table."""
+    path = path or DATA_DIR / "ksure_원유광업_위험지수.csv"
+    df = _read_csv_utf8(path)
+    df["국가명"] = df["국가명"].astype(str).str.strip()
+    df["원유광업_위험지수"] = pd.to_numeric(df["원유광업_위험지수"], errors="coerce")
+    df["기준년월"] = df["기준년월"].astype(str).str.strip()
+    return df.dropna(subset=["국가명"]).reset_index(drop=True)
 
 
 def load_country_imports(path: Path | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -161,10 +243,20 @@ def load_all() -> dict:
     countries, subtotals = load_country_imports()
     grades, grades_monthly = load_grade_imports()
     prices = load_oil_prices()
+    ksure_grades = load_ksure_country_grades()
+    oil_quality = load_oil_quality()
+    eu_ets = load_eu_ets_carbon_prices()
+    gpr_region_monthly = load_gpr_oil_region_monthly()
+    oil_mining_risk = load_ksure_oil_mining_risk()
     return {
         "countries": countries,
         "subtotals": subtotals,
         "grades": grades,
         "grades_monthly": grades_monthly,
         "prices": prices,
+        "ksure_grades": ksure_grades,
+        "oil_quality": oil_quality,
+        "eu_ets": eu_ets,
+        "gpr_region_monthly": gpr_region_monthly,
+        "oil_mining_risk": oil_mining_risk,
     }
