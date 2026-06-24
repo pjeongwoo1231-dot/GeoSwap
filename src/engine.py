@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -80,16 +81,18 @@ FREIGHT_FACTOR: dict[str, float] = {
 }
 
 
+@lru_cache(maxsize=1)
 def _load_ksure_country_grades() -> pd.DataFrame:
     """Load K-SURE country ratings used as the source for geopolitical discounts."""
-    df = pd.read_csv(DATA_DIR / "ksure_국가등급.csv", encoding="utf-8")
+    path = DATA_DIR / "ksure_국가등급.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=["국가명", "국가등급", "평가일자"])
+
+    df = pd.read_csv(path, encoding="utf-8")
     df["국가명"] = df["국가명"].astype(str).str.strip()
     df["국가등급"] = pd.to_numeric(df["국가등급"], errors="coerce").astype("Int64")
     df = df.dropna(subset=["국가명", "국가등급"])
     return df
-
-
-_KSURE_GRADES = _load_ksure_country_grades()
 
 
 def country_grade(country: str) -> int | None:
@@ -98,12 +101,16 @@ def country_grade(country: str) -> int | None:
     if name is None or name in BENCHMARKS:
         return None
 
-    exact = _KSURE_GRADES[_KSURE_GRADES["국가명"] == name]
+    ksure_grades = _load_ksure_country_grades()
+    if ksure_grades.empty:
+        return None
+
+    exact = ksure_grades[ksure_grades["국가명"] == name]
     if len(exact):
         return int(exact.iloc[0]["국가등급"])
 
-    names = _KSURE_GRADES["국가명"].astype(str)
-    part = _KSURE_GRADES[
+    names = ksure_grades["국가명"].astype(str)
+    part = ksure_grades[
         names.str.contains(name, regex=False, na=False) | names.apply(lambda x: x in name)
     ]
     return int(part.iloc[0]["국가등급"]) if len(part) else None
@@ -138,7 +145,10 @@ def ksure_country_risk(countries: pd.DataFrame) -> pd.DataFrame:
 
 def load_oil_mining_risk() -> pd.DataFrame:
     """Load sparse K-SURE oil/mining sector risk index for reference display."""
-    return pd.read_csv(DATA_DIR / "ksure_원유광업_위험지수.csv", encoding="utf-8")
+    path = DATA_DIR / "ksure_원유광업_위험지수.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=["국가명", "원유광업_위험지수", "기준년월"])
+    return pd.read_csv(path, encoding="utf-8")
 
 
 def swap_rate(price_a: float, price_b: float) -> float:
