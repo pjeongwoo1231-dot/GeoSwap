@@ -636,8 +636,8 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.
     st.subheader("✅ 모델 검증 — 공공데이터 대조")
     c1, c2, c3 = st.columns(3)
     c1.metric("모델 추정 도입가", f"${v['model_price']:.2f}")
-    c2.metric("페트로넷 실제 FOB", f"${v['fob_ref']:.2f}", f"오차 {v['fob_err_pct']:+.1f}%")
-    c3.metric("페트로넷 실제 CIF", f"${v['cif_ref']:.2f}", f"오차 {v['cif_err_pct']:+.1f}%")
+    c2.metric("페트로넷 실제 FOB", f"${v['fob_ref']:.2f}", f"오차 {v['fob_err_pct']:+.1f}%", delta_color="off")
+    c3.metric("페트로넷 실제 CIF", f"${v['cif_ref']:.2f}", f"오차 {v['cif_err_pct']:+.1f}%", delta_color="off")
 
     fig_val = go.Figure(
         data=[
@@ -933,6 +933,12 @@ def main():
     ksure_grades = data["ksure_grades"]
 
     eu_ets = data["eu_ets"]
+
+    st.caption(
+        f"🟢 데이터 최신성 — 국제유가 {prices['연월'].max()} · "
+        f"지정학(AI-GPR) {gpr_region_monthly['연월'].max()} · "
+        f"K-SURE 국가등급 2026-02 · 원유 수입 {int(countries['연도'].max())}(연간 확정통계)"
+    )
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
         [
