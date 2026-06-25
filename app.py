@@ -5,8 +5,6 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import base64
-from pathlib import Path
 
 from src.loaders import load_all
 from src.ai_brief import generate_briefing
@@ -83,34 +81,7 @@ def footer():
 
 
 def render_hero():
-    """전체 배경 사진(어둡게) + 흰 반투명 콘텐츠 패널로 가독성 확보."""
-    img = Path(__file__).resolve().parent / "assets" / "hero.jpg"
-    if img.exists():
-        b64 = base64.b64encode(img.read_bytes()).decode()
-        bg = (
-            "linear-gradient(rgba(15,23,42,0.72), rgba(15,23,42,0.88)), "
-            f"url('data:image/jpeg;base64,{b64}')"
-        )
-        st.markdown(
-            f"""
-            <style>
-            .stApp {{
-                background-image: {bg};
-                background-size: cover;
-                background-position: center;
-                background-attachment: fixed;
-            }}
-            .block-container {{
-                background: rgba(255,255,255,0.96);
-                border-radius: 18px;
-                padding: 2.2rem 2.6rem 2.2rem 2.6rem !important;
-                box-shadow: 0 12px 48px rgba(0,0,0,0.30);
-                margin-top: 1.4rem;
-            }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+    """클린한 제목 헤더 (사진 없이 미니멀·프로페셔널)."""
     st.title("🛢️ Geo-Swap")
     st.markdown(
         "위험 산지 원유 **권리**를 안전 산지 원유와 교환(스왑)할 때의 "
