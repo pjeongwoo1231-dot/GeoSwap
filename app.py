@@ -252,6 +252,7 @@ def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
         .rename(columns={"물량_천배럴": "러시아_수입량"})
     )
     rus_import["Date"] = pd.to_datetime(rus_import["연도"].astype(str) + "-12-31")
+    gpr_max = float(gpr_df["GPR_OIL_Russia"].max())
 
     fig_corr = make_subplots(specs=[[{"secondary_y": True}]])
     fig_corr.add_trace(
@@ -283,6 +284,7 @@ def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
             fig_corr.add_annotation(
                 x=pd.Timestamp("2022-03-01"),
                 y=spike_y,
+                yref="y",
                 text="2022-03 GPR 급등",
                 showarrow=True,
                 arrowhead=2,
@@ -293,6 +295,7 @@ def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
             fig_corr.add_annotation(
                 x=pd.Timestamp("2022-12-31"),
                 y=float(import_2022.iloc[0]),
+                yref="y2",
                 text="러시아 수입 절벽",
                 showarrow=True,
                 arrowhead=2,
@@ -305,8 +308,16 @@ def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
         xaxis_title="시점",
         legend=dict(orientation="h", y=-0.2),
     )
-    fig_corr.update_yaxes(title_text="GPR_OIL_Russia", secondary_y=False)
-    fig_corr.update_yaxes(title_text="한국 러시아 원유 수입량 (천 배럴)", secondary_y=True)
+    fig_corr.update_yaxes(
+        title_text="GPR_OIL_Russia",
+        range=[0, gpr_max * 1.15],
+        secondary_y=False,
+    )
+    fig_corr.update_yaxes(
+        title_text="한국 러시아 원유 수입량 (천 배럴)",
+        rangemode="tozero",
+        secondary_y=True,
+    )
     st.plotly_chart(fig_corr, use_container_width=True)
     st.caption("독립된 두 공공데이터가 같은 사건을 증명: 2022-03 지정학 충격과 이후 수입 급감.")
 
