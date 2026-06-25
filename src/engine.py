@@ -412,6 +412,19 @@ def quality_adj(country: str) -> float:
     return 1 + Q_API * (api - API_REF) - Q_S * (sulfur - S_REF)
 
 
+def country_quality_specs(country: str) -> tuple[float | None, float | None]:
+    """Return API gravity and sulfur pct for a country, if available."""
+    row = _quality_row(country)
+    if row is None:
+        return None, None
+    return float(row["API_비중"]), float(row["황함량_pct"])
+
+
+def country_gpr_stress(country: str, t: str | pd.Timestamp | None = None) -> float:
+    """GPR stress for a country's mapped oil region at month t."""
+    return gpr_stress(_gpr_region_for_country(country), t)
+
+
 def gpr_stress(region: str | None, t: str | pd.Timestamp | None) -> float:
     """Normalize GPR stress so median->0 and p90->1, clipped to [0, 2]."""
     if region is None:

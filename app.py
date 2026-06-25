@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.loaders import load_all
+from src.ai_brief import generate_briefing
 from src.engine import (
     BENCHMARKS,
     COUNTRY_BENCHMARK,
@@ -17,6 +18,8 @@ from src.engine import (
     HIGH_RISK_COUNTRIES,
     STRUCTURING_FEE_RATE,
     country_grade,
+    country_gpr_stress,
+    country_quality_specs,
     country_year_totals,
     esg_swap_metrics,
     geo_discount,
@@ -784,6 +787,51 @@ def tab_swap_calculator(prices):
         )
     else:
         st.caption("벤치마크 직접 선택 시 항로 ESG 절감은 국가 단위로 'ESG 절감' 탭에서 확인하세요.")
+
+    volume_bbl = 1_000_000
+    if name_a in COUNTRY_BENCHMARK and name_b in COUNTRY_BENCHMARK:
+        esg_brief = esg_swap_metrics(name_a, name_b, volume_bbl)
+        co2_saved = esg_brief["co2_saved_ton"]
+        freight_saved = esg_brief["freight_saved_usd"]
+    else:
+        co2_saved = 0.0
+        freight_saved = 0.0
+
+    api_a, sulfur_a = country_quality_specs(name_a)
+    api_a = api_a if api_a is not None else 0.0
+    sulfur_a = sulfur_a if sulfur_a is not None else 0.0
+    grade_a_val = grade_a if grade_a is not None else 0
+    gpr_stress_a = country_gpr_stress(name_a, selected_month)
+
+    st.divider()
+    st.subheader("🤖 AI 지정학 브리핑")
+    st.caption(
+        "Gemini가 공공데이터 지표를 해석해 스왑 추천을 생성합니다. "
+        "지정학지수는 LLM 생성 데이터(AI-GPR) 기반."
+    )
+    if st.button("브리핑 생성"):
+        with st.spinner("AI가 지정학 리스크를 분석 중…"):
+            text = generate_briefing(
+                name_a,
+                name_b,
+                selected_month,
+                grade_a_val,
+                api_a,
+                sulfur_a,
+                gpr_stress_a,
+                discount_a,
+                rate,
+                volume_bbl,
+                co2_saved,
+                freight_saved,
+            )
+        if text is None:
+            st.info(
+                "AI 브리핑을 쓰려면 Streamlit Secrets에 GEMINI_API_KEY를 설정하세요. "
+                "(설정 전에도 나머지 기능은 정상)"
+            )
+        else:
+            st.markdown(text)
 
 
 def tab_geopolitical_risk(countries):
