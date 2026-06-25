@@ -163,6 +163,13 @@ FREIGHT_PER_BBL_NM = 3.9e-4  # USD / (barrel·nm)
 ETS_EUR = 81.24  # gas_EU_ETS_탄소가격.csv latest annual avg (€/ton)
 EUR_KRW = 1450  # FX for carbon value conversion
 
+# Market impact model (adjustable)
+BASE_ROUTE_NM = 6400  # safe import baseline: Middle East -> Korea
+CRUDE_PRICE_USD = 73.0  # benchmark crude price ($/bbl)
+STRUCTURING_FEE_RATE = 0.005  # structuring fee on swapped volume
+TON_PER_TREE = 0.022  # annual CO2 uptake per tree (ton)
+TON_PER_CAR = 4.6  # annual CO2 emissions per passenger car (ton)
+
 
 def route_distance(country: str) -> float:
     """One-way sea distance (nm) from origin country to Korea (Ulsan approx)."""
@@ -195,6 +202,70 @@ def esg_swap_metrics(
         "co2_saved_ton": co2_saved_ton,
         "freight_saved_usd": freight_saved_usd,
         "carbon_value_krw": carbon_value_krw,
+    }
+
+
+def market_impact(
+    countries: pd.DataFrame,
+    year: int = 2024,
+    fee_rate: float = STRUCTURING_FEE_RATE,
+    ets_eur: float = ETS_EUR,
+    eur_krw: float = EUR_KRW,
+) -> dict:
+    """Annual market size and ESG impact aggregated from country imports."""
+    df = countries[countries["연도"] == year]
+    total_vol = swap_vol = co2 = freight_usd = carbon_krw = fee_usd = 0.0
+    per_country: list[dict] = []
+
+    for _, row in df.iterrows():
+        volume_bbl = int(row["물량_천배럴"]) * 1000
+        if volume_bbl <= 0:
+            continue
+
+        total_vol += volume_bbl
+        region = COUNTRY_TO_ROUTE.get(row["국가"])
+        dist = ROUTE_NM.get(region, ROUTE_NM["아시아"])
+        saved = max(dist - BASE_ROUTE_NM, 0.0)
+        country_co2 = saved * volume_bbl * CO2_PER_BBL_NM
+        country_freight_usd = saved * volume_bbl * FREIGHT_PER_BBL_NM
+        country_carbon_krw = country_co2 * ets_eur * eur_krw
+
+        co2 += country_co2
+        freight_usd += country_freight_usd
+        carbon_krw += country_carbon_krw
+
+        if saved > 0:
+            swap_vol += volume_bbl
+            fee_usd += volume_bbl * CRUDE_PRICE_USD * fee_rate
+            per_country.append(
+                {
+                    "국가": row["국가"],
+                    "물량_배럴": volume_bbl,
+                    "거리절감_nm": saved,
+                    "탄소절감_t": country_co2,
+                    "가치_원": country_carbon_krw + country_freight_usd * eur_krw,
+                }
+            )
+
+    freight_krw = freight_usd * eur_krw
+    fee_krw = fee_usd * eur_krw
+    per_country_df = pd.DataFrame(per_country)
+    if not per_country_df.empty:
+        per_country_df = per_country_df.sort_values("가치_원", ascending=False).reset_index(drop=True)
+
+    return {
+        "총물량": total_vol,
+        "스왑대상물량": swap_vol,
+        "탄소절감_t": co2,
+        "탄소가치_원": carbon_krw,
+        "운임절감_원": freight_krw,
+        "수수료_원": fee_krw,
+        "사회가치_원": carbon_krw + freight_krw,
+        "하나수익_원": fee_krw,
+        "총시장_원": carbon_krw + freight_krw + fee_krw,
+        "per_country": per_country_df,
+        "나무": co2 / TON_PER_TREE,
+        "승용차": co2 / TON_PER_CAR,
     }
 
 

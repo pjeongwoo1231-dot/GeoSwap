@@ -15,6 +15,7 @@ from src.engine import (
     FREIGHT_PER_BBL_NM,
     GRADE_TO_DISCOUNT,
     HIGH_RISK_COUNTRIES,
+    STRUCTURING_FEE_RATE,
     country_grade,
     country_year_totals,
     esg_swap_metrics,
@@ -24,6 +25,7 @@ from src.engine import (
     ksure_country_risk,
     latest_swap_rate,
     load_oil_mining_risk,
+    market_impact,
     middle_east_share_by_year,
     monthly_swap_series,
     quality_adj,
@@ -51,6 +53,18 @@ def default_ets_eur(eu_ets: pd.DataFrame) -> float:
 
 def esg_country_options() -> list[str]:
     return sorted(COUNTRY_BENCHMARK.keys())
+
+
+def fmt_eok_krw(value: float) -> str:
+    return f"₩{value / 1e8:,.0f}억"
+
+
+def fmt_man_ton(value: float) -> str:
+    return f"{value / 1e4:,.0f}만 톤"
+
+
+def fmt_eok_bbl(value: float) -> str:
+    return f"{value / 1e8:.1f}억 배럴"
 
 
 @st.cache_data
@@ -482,6 +496,136 @@ def tab_esg_savings(eu_ets: pd.DataFrame):
         )
 
 
+def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame):
+    st.header("📈 시장규모·임팩트")
+    st.markdown(
+        "한국 **원유 도입 전체**를 Geo-Swap 관점에서 합산한 연간 시장규모와 "
+        "ESG·금융 임팩트 추정입니다. (공공데이터 기반 보수적 추정)"
+    )
+
+    years = sorted(countries["연도"].unique())
+    default_ets = default_ets_eur(eu_ets)
+
+    col_year, col_fee, col_ets = st.columns(3)
+    with col_year:
+        year = st.selectbox("기준 연도", years, index=len(years) - 1)
+    with col_fee:
+        fee_rate = st.slider(
+            "구조화 수수료율 (가정)",
+            min_value=0.001,
+            max_value=0.02,
+            value=STRUCTURING_FEE_RATE,
+            step=0.001,
+            format="%.3f",
+        )
+    with col_ets:
+        ets_eur = st.number_input(
+            "탄소가격 (€/톤)",
+            min_value=0.0,
+            value=float(default_ets),
+            step=1.0,
+            format="%.2f",
+        )
+
+    impact = market_impact(
+        countries,
+        year=int(year),
+        fee_rate=fee_rate,
+        ets_eur=ets_eur,
+        eur_krw=EUR_KRW,
+    )
+    swap_share_pct = (
+        impact["스왑대상물량"] / impact["총물량"] * 100 if impact["총물량"] else 0.0
+    )
+
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        st.metric("연간 시장규모", fmt_eok_krw(impact["총시장_원"]))
+    with h2:
+        st.metric("CO₂ 절감", fmt_man_ton(impact["탄소절감_t"]))
+    with h3:
+        st.metric(
+            "스왑 대상",
+            fmt_eok_bbl(impact["스왑대상물량"]),
+            delta=f"도입의 {swap_share_pct:.0f}%",
+        )
+
+    st.info(
+        f"CO₂ {fmt_man_ton(impact['탄소절감_t'])} = "
+        f"🌳 **나무 {impact['나무'] / 1e4:,.0f}만 그루** / "
+        f"🚗 **승용차 {impact['승용차'] / 1e4:,.1f}만 대** 1년치"
+    )
+
+    st.subheader("Win-Win-Win 가치 분해")
+    win1, win2, win3 = st.columns(3)
+    with win1:
+        st.metric("정유사 운임절감", fmt_eok_krw(impact["운임절감_원"]))
+    with win2:
+        st.metric("환경 탄소가치", fmt_eok_krw(impact["탄소가치_원"]))
+    with win3:
+        st.metric("하나 신규수익", fmt_eok_krw(impact["하나수익_원"]))
+    st.caption("고객·지구·하나 3자 모두 이득 — ESG형 미래금융")
+
+    fig_breakdown = go.Figure(
+        data=[
+            go.Bar(
+                x=["정유사 운임절감", "환경 탄소가치", "하나 신규수익"],
+                y=[
+                    impact["운임절감_원"] / 1e8,
+                    impact["탄소가치_원"] / 1e8,
+                    impact["하나수익_원"] / 1e8,
+                ],
+                marker_color=["#1f77b4", "#2ca02c", "#ff7f0e"],
+                text=[
+                    fmt_eok_krw(impact["운임절감_원"]),
+                    fmt_eok_krw(impact["탄소가치_원"]),
+                    fmt_eok_krw(impact["하나수익_원"]),
+                ],
+                textposition="outside",
+            )
+        ]
+    )
+    fig_breakdown.update_layout(
+        title=f"{year}년 Geo-Swap 가치 분해 (억 원)",
+        yaxis_title="억 원",
+        yaxis=dict(rangemode="tozero"),
+    )
+    st.plotly_chart(fig_breakdown, use_container_width=True)
+
+    per_country = impact["per_country"]
+    if not per_country.empty:
+        st.subheader("국가별 기여 Top 8")
+        top8 = per_country.head(8).sort_values("가치_원")
+        fig_top = px.bar(
+            top8,
+            x="가치_원",
+            y="국가",
+            orientation="h",
+            title=f"{year}년 스왑 가치 기여 상위 8개국",
+            labels={"가치_원": "가치 (원)", "국가": ""},
+            text=top8["가치_원"].apply(lambda v: fmt_eok_krw(v)),
+        )
+        fig_top.update_traces(textposition="outside")
+        fig_top.update_layout(yaxis=dict(categoryorder="total ascending"))
+        st.plotly_chart(fig_top, use_container_width=True)
+
+    st.markdown(
+        "본 추정은 **크루드·한국·1년** 기준입니다. "
+        "가스(한국가스공사)·타 수입국·누적 적용 시 **수조 원 규모**로 확대될 수 있습니다."
+    )
+
+    with st.expander("가정·계산 근거 (방어용)"):
+        st.markdown(
+            f"- **거리**: sea-distances.org 기반 근사, 안전 인도 기준 {6400:,} nm (중동→한국)\n"
+            f"- **탄소계수**: IMO VLCC 근사 ≈0.3 g CO₂/(배럴·해리) = 3e-7 t/(배럴·해리)\n"
+            f"- **운임계수**: ${FREIGHT_PER_BBL_NM} / (배럴·해리)\n"
+            f"- **탄소가격**: 한국가스공사 EU ETS €{ets_eur:.2f}/톤 × ₩{EUR_KRW:,}/€\n"
+            f"- **수수료율**: {fee_rate:.1%} (가정·슬라이더 조정 가능)\n"
+            f"- **스왑 대상**: 중동보다 먼 항로 국가 수입 전량 (거리 절감 > 0)\n"
+            "- 모든 계수는 공공데이터·업계 표준 기반의 **보수적 추정**입니다."
+        )
+
+
 def tab_swap_calculator(prices):
     st.header("⭐ 석유 환율 계산기")
     st.markdown(
@@ -703,7 +847,7 @@ def main():
 
     eu_ets = data["eu_ets"]
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
         [
             "📊 원유 수입 구조",
             "🛢️ 유질 구성",
@@ -711,6 +855,7 @@ def main():
             "⭐ 석유 환율 계산기",
             "🔍 심층분석",
             "🌱 ESG 절감",
+            "📈 시장규모·임팩트",
             "🌍 지정학 리스크",
         ]
     )
@@ -728,6 +873,8 @@ def main():
     with tab6:
         tab_esg_savings(eu_ets)
     with tab7:
+        tab_market_impact(countries, eu_ets)
+    with tab8:
         tab_geopolitical_risk(countries)
 
     st.divider()
