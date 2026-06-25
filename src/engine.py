@@ -116,6 +116,87 @@ FREIGHT_FACTOR: dict[str, float] = {
     "default": 1.0,
 }
 
+# Phase E — route distance / carbon / freight (editable)
+ROUTE_NM: dict[str, float] = {
+    "중동": 6400,
+    "카자흐스탄": 11500,
+    "러시아": 8500,
+    "미국": 9500,
+    "서아프리카": 10500,
+    "베네수엘라": 10000,
+    "멕시코": 8500,
+    "브라질": 11000,
+    "유럽": 11000,
+    "아시아": 2500,
+}
+
+COUNTRY_TO_ROUTE: dict[str, str] = {
+    "사우디아라비아": "중동",
+    "아랍에미리트": "중동",
+    "쿠웨이트": "중동",
+    "이라크": "중동",
+    "카타르": "중동",
+    "오만": "중동",
+    "중립지대": "중동",
+    "카자흐스탄": "카자흐스탄",
+    "러시아": "러시아",
+    "미국": "미국",
+    "캐나다": "미국",
+    "멕시코": "멕시코",
+    "브라질": "브라질",
+    "베네수엘라": "베네수엘라",
+    "콜롬비아": "베네수엘라",
+    "에콰도르": "베네수엘라",
+    "나이지리아": "서아프리카",
+    "앙골라": "서아프리카",
+    "적도기니": "서아프리카",
+    "가봉": "서아프리카",
+    "콩고": "서아프리카",
+    "알제리": "서아프리카",
+    "카메룬": "서아프리카",
+    "노르웨이": "유럽",
+    "영국": "유럽",
+}
+
+CO2_PER_BBL_NM = 3e-7  # ton CO2 / (barrel·nm), ≈0.3 g CO2/(barrel·nm) IMO VLCC approx
+FREIGHT_PER_BBL_NM = 3.9e-4  # USD / (barrel·nm)
+ETS_EUR = 81.24  # gas_EU_ETS_탄소가격.csv latest annual avg (€/ton)
+EUR_KRW = 1450  # FX for carbon value conversion
+
+
+def route_distance(country: str) -> float:
+    """One-way sea distance (nm) from origin country to Korea (Ulsan approx)."""
+    key = COUNTRY_TO_ROUTE.get(country)
+    return ROUTE_NM.get(key, ROUTE_NM["아시아"])
+
+
+def esg_swap_metrics(
+    country_from: str,
+    country_to: str,
+    volume_bbl: float,
+    ets_eur: float = ETS_EUR,
+    eur_krw: float = EUR_KRW,
+) -> dict[str, float]:
+    """ESG savings when swapping risky origin imports for a safer origin."""
+    d_from = route_distance(country_from)
+    d_to = route_distance(country_to)
+    d_saved = max(d_from - d_to, 0.0)
+    co2_direct_ton = d_from * volume_bbl * CO2_PER_BBL_NM
+    co2_swap_ton = d_to * volume_bbl * CO2_PER_BBL_NM
+    co2_saved_ton = co2_direct_ton - co2_swap_ton
+    freight_saved_usd = d_saved * volume_bbl * FREIGHT_PER_BBL_NM
+    carbon_value_krw = co2_saved_ton * ets_eur * eur_krw
+    return {
+        "distance_from_nm": d_from,
+        "distance_to_nm": d_to,
+        "distance_saved_nm": d_saved,
+        "co2_direct_ton": co2_direct_ton,
+        "co2_swap_ton": co2_swap_ton,
+        "co2_saved_ton": co2_saved_ton,
+        "freight_saved_usd": freight_saved_usd,
+        "carbon_value_krw": carbon_value_krw,
+    }
+
 
 def _read_csv_utf8(path: Path) -> pd.DataFrame:
     """Read UTF-8 CSV and strip duplicate BOM markers."""

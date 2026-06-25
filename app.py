@@ -10,10 +10,14 @@ from src.loaders import load_all
 from src.engine import (
     BENCHMARKS,
     COUNTRY_BENCHMARK,
+    EUR_KRW,
+    ETS_EUR,
+    FREIGHT_PER_BBL_NM,
     GRADE_TO_DISCOUNT,
     HIGH_RISK_COUNTRIES,
     country_grade,
     country_year_totals,
+    esg_swap_metrics,
     geo_discount,
     hhi_by_year,
     high_risk_share_by_year,
@@ -27,11 +31,26 @@ from src.engine import (
 )
 
 DATA_SOURCE_FOOTER = (
-    "데이터 출처 · 한국석유공사[KOSIS TX_31801_A008] · 국제유가[페트로넷] · "
-    "한국무역보험공사 국가신용등급·원유광업 위험지수(지정학 할인 근거)"
+    "데이터: 산업통상부 — 한국석유공사(국가별·유질별 원유수입·국제유가) · "
+    "한국무역보험공사(국가신용등급) · 한국가스공사(EU ETS 탄소가격) | "
+    "연계: EIA(원유품질 API·황), GPR 지정학지수 | "
+    "운송거리(sea-distances 근사)·탄소계수(IMO) 기반 ESG 추정 | "
+    "모델 검증: 페트로넷 CIF 도입단가"
 )
 
 GRADE_LABELS = {"light": "경질유", "medium": "중(中)질유", "heavy": "중(重)질유"}
+
+
+def default_ets_eur(eu_ets: pd.DataFrame) -> float:
+    """Latest EU ETS annual average (€/ton) from bundled CSV."""
+    if eu_ets is None or eu_ets.empty:
+        return ETS_EUR
+    latest = eu_ets.sort_values("연도").iloc[-1]
+    return float(latest["연평균(Euro)"])
+
+
+def esg_country_options() -> list[str]:
+    return sorted(COUNTRY_BENCHMARK.keys())
 
 
 @st.cache_data
@@ -379,6 +398,90 @@ def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
         )
 
 
+def tab_esg_savings(eu_ets: pd.DataFrame):
+    st.header("🌱 ESG 절감")
+    st.markdown(
+        "위험 산지 원유를 안전 산지 원유로 **스왑**하면 실물 항로가 짧아져 "
+        "**탄소발자국·운임**을 절감할 수 있습니다."
+    )
+
+    countries = esg_country_options()
+    default_ets = default_ets_eur(eu_ets)
+
+    col_a, col_b, col_vol, col_carbon = st.columns(4)
+    with col_a:
+        idx_a = countries.index("카자흐스탄") if "카자흐스탄" in countries else 0
+        country_from = st.selectbox("위험 산지 A", countries, index=idx_a)
+    with col_b:
+        idx_b = countries.index("사우디아라비아") if "사우디아라비아" in countries else 0
+        country_to = st.selectbox("안전 산지 B", countries, index=idx_b)
+    with col_vol:
+        volume_bbl = st.number_input(
+            "거래량 (배럴)",
+            min_value=1000,
+            max_value=2_000_000,
+            value=1_000_000,
+            step=100_000,
+        )
+    with col_carbon:
+        ets_eur = st.number_input(
+            "탄소가격 (€/톤)",
+            min_value=0.0,
+            value=float(default_ets),
+            step=1.0,
+            format="%.2f",
+        )
+
+    metrics = esg_swap_metrics(
+        country_from,
+        country_to,
+        float(volume_bbl),
+        ets_eur=ets_eur,
+        eur_krw=EUR_KRW,
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("운송거리 절감", f"{metrics['distance_saved_nm']:,.0f} nm")
+    with m2:
+        st.metric("탄소발자국 절감", f"{metrics['co2_saved_ton']:,.0f} t CO₂")
+    with m3:
+        st.metric("탄소가치", f"₩{metrics['carbon_value_krw']:,.0f}")
+    with m4:
+        st.metric("운임 절감", f"${metrics['freight_saved_usd']:,.0f}")
+
+    fig_co2 = go.Figure(
+        data=[
+            go.Bar(
+                x=["직도입 (A→한국)", "스왑 (B→한국)"],
+                y=[metrics["co2_direct_ton"], metrics["co2_swap_ton"]],
+                marker_color=["crimson", "seagreen"],
+                text=[
+                    f"{metrics['co2_direct_ton']:,.0f} t",
+                    f"{metrics['co2_swap_ton']:,.0f} t",
+                ],
+                textposition="outside",
+            )
+        ]
+    )
+    fig_co2.update_layout(
+        title=f"탄소발자국 비교 — {country_from} 직도입 vs {country_to} 스왑",
+        yaxis_title="톤 CO₂",
+        yaxis=dict(rangemode="tozero"),
+    )
+    st.plotly_chart(fig_co2, use_container_width=True)
+
+    with st.expander("계산 근거·가정"):
+        st.markdown(
+            f"- **항로 거리**: sea-distances.org 기반 근사 "
+            f"(A {metrics['distance_from_nm']:,.0f} nm → B {metrics['distance_to_nm']:,.0f} nm, "
+            f"절감 {metrics['distance_saved_nm']:,.0f} nm)\n"
+            f"- **탄소계수**: ≈0.3 g CO₂/(배럴·해리) — IMO VLCC 벙커유 소비 근사\n"
+            f"- **운임계수**: ${FREIGHT_PER_BBL_NM} / (배럴·해리)\n"
+            f"- **탄소가격**: 한국가스공사 제공 EU ETS €{ets_eur:.2f}/톤 × ₩{EUR_KRW:,}/€"
+        )
+
+
 def tab_swap_calculator(prices):
     st.header("⭐ 석유 환율 계산기")
     st.markdown(
@@ -526,7 +629,15 @@ def tab_swap_calculator(prices):
 
     st.markdown("---")
     st.markdown("#### 🚢 이 스왑으로 절감되는 운송거리/탄소")
-    st.caption("TODO(v2): 항로 거리·탄소 배출량 데이터 연동 예정")
+    if name_a in COUNTRY_BENCHMARK and name_b in COUNTRY_BENCHMARK:
+        esg = esg_swap_metrics(name_a, name_b, 1_000_000)
+        st.markdown(
+            f"이 스왑은 운송거리 약 **{esg['distance_saved_nm']:,.0f}**해리를 줄여 "
+            f"탄소 **{esg['co2_saved_ton']:,.0f}**톤을 절감합니다 (100만 배럴 기준) → "
+            "자세히는 **'🌱 ESG 절감'** 탭"
+        )
+    else:
+        st.caption("벤치마크 직접 선택 시 항로 ESG 절감은 국가 단위로 'ESG 절감' 탭에서 확인하세요.")
 
 
 def tab_geopolitical_risk(countries):
@@ -590,13 +701,16 @@ def main():
     oil_quality = data["oil_quality"]
     ksure_grades = data["ksure_grades"]
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    eu_ets = data["eu_ets"]
+
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
         [
             "📊 원유 수입 구조",
             "🛢️ 유질 구성",
             "💵 국제유가 & 스프레드",
             "⭐ 석유 환율 계산기",
             "🔍 심층분석",
+            "🌱 ESG 절감",
             "🌍 지정학 리스크",
         ]
     )
@@ -612,6 +726,8 @@ def main():
     with tab5:
         tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades)
     with tab6:
+        tab_esg_savings(eu_ets)
+    with tab7:
         tab_geopolitical_risk(countries)
 
     st.divider()
