@@ -440,6 +440,7 @@ def tab_esg_savings(eu_ets: pd.DataFrame):
     with col_carbon:
         ets_eur = st.number_input(
             "탄소가격 (€/톤)",
+            key="esg_ets_eur",
             min_value=0.0,
             value=float(default_ets),
             step=1.0,
@@ -521,6 +522,7 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame):
     with col_ets:
         ets_eur = st.number_input(
             "탄소가격 (€/톤)",
+            key="mi_ets_eur",
             min_value=0.0,
             value=float(default_ets),
             step=1.0,
