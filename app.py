@@ -1,4 +1,4 @@
-"""Hana Geo-Swap — Petroleum Swap Rate Dashboard."""
+"""Geo-Swap — Petroleum Swap Rate Dashboard."""
 
 import pandas as pd
 import streamlit as st
@@ -569,13 +569,13 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.
     with win2:
         st.metric("환경 탄소가치", fmt_eok_krw(impact["탄소가치_원"]))
     with win3:
-        st.metric("하나 신규수익", fmt_eok_krw(impact["하나수익_원"]))
-    st.caption("고객·지구·하나 3자 모두 이득 — ESG형 미래금융")
+        st.metric("플랫폼 신규수익", fmt_eok_krw(impact["하나수익_원"]))
+    st.caption("고객·지구·플랫폼 3자 모두 이득 — ESG형 미래금융")
 
     fig_breakdown = go.Figure(
         data=[
             go.Bar(
-                x=["정유사 운임절감", "환경 탄소가치", "하나 신규수익"],
+                x=["정유사 운임절감", "환경 탄소가치", "플랫폼 신규수익"],
                 y=[
                     impact["운임절감_원"] / 1e8,
                     impact["탄소가치_원"] / 1e8,
@@ -913,14 +913,32 @@ def tab_geopolitical_risk(countries):
 
 def main():
     st.set_page_config(
-        page_title="Hana Geo-Swap",
+        page_title="Geo-Swap",
         page_icon="🛢️",
         layout="wide",
     )
-    st.title("🛢️ Hana Geo-Swap")
+    st.markdown(
+        """
+        <style>
+        .block-container { padding-top: 2.6rem; max-width: 1320px; }
+        [data-testid="stMetric"] {
+            background: #F8FAFC;
+            border: 1px solid #E2E8F0;
+            border-radius: 12px;
+            padding: 14px 18px;
+        }
+        [data-testid="stMetricLabel"] p { font-size: 0.85rem; opacity: 0.62; }
+        h1 { letter-spacing: -0.5px; font-weight: 800; }
+        h2, h3 { letter-spacing: -0.3px; }
+        [data-testid="stTabs"] button[data-baseweb="tab"] { font-weight: 600; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.title("🛢️ Geo-Swap")
     st.markdown(
         "위험 산지 원유 **권리**를 안전 산지 원유와 교환(스왑)할 때의 "
-        "**석유 환율(Petroleum Swap Rate)** 대시보드"
+        "**석유 환율(Petroleum Swap Rate)** 플랫폼"
     )
 
     data = get_data()

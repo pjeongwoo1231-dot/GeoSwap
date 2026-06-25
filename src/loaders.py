@@ -1,4 +1,4 @@
-"""CSV loading and cleaning for Hana Geo-Swap dashboard."""
+"""CSV loading and cleaning for Geo-Swap dashboard."""
 
 import io
 import re
