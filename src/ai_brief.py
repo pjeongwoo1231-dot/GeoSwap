@@ -1,7 +1,8 @@
 from google import genai
+from google.genai import types
 import streamlit as st
 
-MODEL = "gemini-3.5-flash"  # 무료·빠름. 만약 모델 미지원 오류 시 "gemini-2.5-flash"로 교체
+MODEL = "gemini-2.5-flash"  # 안정 generate_content API. 미지원 시 "gemini-2.0-flash"로 교체
 
 
 def _client():
@@ -54,11 +55,14 @@ def generate_briefing(
 2) **스왑 추천** — 방향과 정량 근거(배럴 환산·차익)
 3) **핵심 리스크 1가지**"""
     try:
-        interaction = client.interactions.create(
+        response = client.models.generate_content(
             model=MODEL,
-            system_instruction=SYSTEM,
-            input=prompt,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM,
+                max_output_tokens=2000,
+            ),
         )
-        return interaction.output_text
+        return response.text
     except Exception as e:  # 한도/네트워크/모델 오류 → 앱 안 죽게
         return f"⚠️ AI 브리핑 생성 중 오류: {e}"
