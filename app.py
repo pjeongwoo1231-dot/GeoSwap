@@ -83,29 +83,38 @@ def footer():
 
 
 def render_hero():
-    """석유·석양 무드의 히어로 배너 (어두운 그라데이션 오버레이로 가독성 확보)."""
+    """전체 배경 사진(어둡게) + 흰 반투명 콘텐츠 패널로 가독성 확보."""
     img = Path(__file__).resolve().parent / "assets" / "hero.jpg"
     if img.exists():
         b64 = base64.b64encode(img.read_bytes()).decode()
-        layer = (
-            "linear-gradient(135deg, rgba(15,23,42,0.82), rgba(15,118,110,0.55)), "
+        bg = (
+            "linear-gradient(rgba(15,23,42,0.72), rgba(15,23,42,0.88)), "
             f"url('data:image/jpeg;base64,{b64}')"
         )
-    else:
-        layer = "linear-gradient(135deg, #0F172A, #0F766E)"
+        st.markdown(
+            f"""
+            <style>
+            .stApp {{
+                background-image: {bg};
+                background-size: cover;
+                background-position: center;
+                background-attachment: fixed;
+            }}
+            .block-container {{
+                background: rgba(255,255,255,0.96);
+                border-radius: 18px;
+                padding: 2.2rem 2.6rem 2.2rem 2.6rem !important;
+                box-shadow: 0 12px 48px rgba(0,0,0,0.30);
+                margin-top: 1.4rem;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.title("🛢️ Geo-Swap")
     st.markdown(
-        f"""
-        <div style="background:{layer};background-size:cover;background-position:center 35%;
-             border-radius:16px;padding:32px 40px;margin:0 0 14px 0;
-             box-shadow:0 6px 26px rgba(15,23,42,0.20);">
-          <div style="color:#F8FAFC;font-size:2.4rem;font-weight:800;letter-spacing:-1px;">
-            🛢️ Geo-Swap</div>
-          <div style="color:#E2E8F0;font-size:1.05rem;margin-top:6px;max-width:780px;">
-            위험 산지 원유 <b>권리</b>를 안전 산지 원유와 교환(스왑)할 때의
-            <b>석유 환율(Petroleum Swap Rate)</b> 플랫폼</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+        "위험 산지 원유 **권리**를 안전 산지 원유와 교환(스왑)할 때의 "
+        "**석유 환율(Petroleum Swap Rate)** 플랫폼"
     )
 
 
