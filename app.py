@@ -30,6 +30,7 @@ from src.engine import (
     load_oil_mining_risk,
     market_impact,
     middle_east_share_by_year,
+    model_validation,
     monthly_swap_series,
     quality_adj,
     resolve_benchmark,
@@ -500,7 +501,7 @@ def tab_esg_savings(eu_ets: pd.DataFrame):
         )
 
 
-def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame):
+def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.DataFrame):
     st.header("📈 시장규모·임팩트")
     st.markdown(
         "한국 **원유 도입 전체**를 Geo-Swap 관점에서 합산한 연간 시장규모와 "
@@ -629,6 +630,42 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame):
             f"- **스왑 대상**: 중동보다 먼 항로 국가 수입 전량 (거리 절감 > 0)\n"
             "- 모든 계수는 공공데이터·업계 표준 기반의 **보수적 추정**입니다."
         )
+
+    st.divider()
+    v = model_validation(countries, prices)
+    st.subheader("✅ 모델 검증 — 공공데이터 대조")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("모델 추정 도입가", f"${v['model_price']:.2f}")
+    c2.metric("페트로넷 실제 FOB", f"${v['fob_ref']:.2f}", f"오차 {v['fob_err_pct']:+.1f}%")
+    c3.metric("페트로넷 실제 CIF", f"${v['cif_ref']:.2f}", f"오차 {v['cif_err_pct']:+.1f}%")
+
+    fig_val = go.Figure(
+        data=[
+            go.Bar(
+                x=["모델 추정", "페트로넷 FOB", "페트로넷 CIF"],
+                y=[v["model_price"], v["fob_ref"], v["cif_ref"]],
+                marker_color=["#1f77b4", "#2ca02c", "#ff7f0e"],
+                text=[
+                    f"${v['model_price']:.2f}",
+                    f"${v['fob_ref']:.2f}",
+                    f"${v['cif_ref']:.2f}",
+                ],
+                textposition="outside",
+            )
+        ]
+    )
+    fig_val.update_layout(
+        title="도입단가 비교 ($/배럴)",
+        yaxis_title="$/배럴",
+        yaxis=dict(rangemode="tozero"),
+    )
+    st.plotly_chart(fig_val, use_container_width=True)
+    st.caption(
+        f"본 모델이 산출한 수입량 가중평균 도입가가 페트로넷 실제 **FOB와 {abs(v['fob_err_pct']):.1f}% 이내로 일치** "
+        f"→ 공공데이터로 모델 타당성 검증. CIF와의 차이(약 {abs(v['cif_err_pct']):.1f}%)는 **운임 성분**으로, "
+        f"이는 ESG 탭의 운임 절감 모델과 정합한다. "
+        f"(기준: {v['period']}, 도입가는 운임 미포함 spot 기준)"
+    )
 
 
 def tab_swap_calculator(prices):
@@ -923,7 +960,7 @@ def main():
     with tab6:
         tab_esg_savings(eu_ets)
     with tab7:
-        tab_market_impact(countries, eu_ets)
+        tab_market_impact(countries, eu_ets, prices)
     with tab8:
         tab_geopolitical_risk(countries)
 

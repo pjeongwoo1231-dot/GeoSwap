@@ -269,6 +269,41 @@ def market_impact(
     }
 
 
+# Petronet actual crude import unit prices (2025 Jan–Apr avg, $/bbl). Source: Petronet import stats.
+PETRONET_FOB_REF = 72.71
+PETRONET_CIF_REF = 76.76
+PETRONET_REF_PERIOD = "2025년 1~4월"
+
+
+def model_validation(
+    countries: pd.DataFrame,
+    prices: pd.DataFrame,
+    ref_year: int = 2025,
+    ref_months: tuple[int, ...] = (1, 2, 3, 4),
+    vol_year: int = 2024,
+) -> dict:
+    """Volume-weighted model import price vs Petronet actual FOB/CIF."""
+    q = prices[(prices["연도"] == ref_year) & (prices["월"].isin(ref_months))]
+    p_ref = float(q["Dubai"].mean())
+    vol = countries[countries["연도"] == vol_year]
+    weighted_sum = total_vol = 0.0
+    for _, row in vol.iterrows():
+        v = int(row["물량_천배럴"])
+        if v <= 0:
+            continue
+        weighted_sum += p_ref * quality_adj(row["국가"]) * (1 - geo_discount(row["국가"])) * v
+        total_vol += v
+    model_price = weighted_sum / total_vol if total_vol else 0.0
+    return {
+        "model_price": model_price,
+        "fob_ref": PETRONET_FOB_REF,
+        "cif_ref": PETRONET_CIF_REF,
+        "fob_err_pct": (model_price - PETRONET_FOB_REF) / PETRONET_FOB_REF * 100,
+        "cif_err_pct": (model_price - PETRONET_CIF_REF) / PETRONET_CIF_REF * 100,
+        "period": PETRONET_REF_PERIOD,
+    }
+
+
 def _read_csv_utf8(path: Path) -> pd.DataFrame:
     """Read UTF-8 CSV and strip duplicate BOM markers."""
     raw_bytes = path.read_bytes()
