@@ -41,8 +41,13 @@ def generate_briefing(
     client = _client()
     if client is None:
         return None  # 키 없음 → UI에서 안내
+    quality_str = (
+        f"품질 API {api_a}/황 {sulfur_a}%"
+        if api_a and float(api_a) > 0
+        else "품질 데이터 미보유(중립 처리)"
+    )
     prompt = f"""다음은 Geo-Swap 플랫폼의 현재 분석 상태입니다.
-- 위험 산지(A): {country_a} (K-SURE 등급 {grade_a}/7, 품질 API {api_a}/황 {sulfur_a}%)
+- 위험 산지(A): {country_a} (K-SURE 등급 {grade_a}/7, {quality_str})
 - 안전 산지(B): {country_b}
 - 기준 시점: {month}
 - AI-GPR 지정학 스트레스(A 지역): {gpr_stress:.2f} (0=평시, 1=p90, 2=극단)
@@ -60,7 +65,8 @@ def generate_briefing(
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM,
-                max_output_tokens=2000,
+                max_output_tokens=1500,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         return response.text
