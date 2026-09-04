@@ -160,12 +160,18 @@ COUNTRY_TO_ROUTE: dict[str, str] = {
 
 CO2_PER_BBL_NM = 3e-7  # ton CO2 / (barrel·nm), ≈0.3 g CO2/(barrel·nm) IMO VLCC approx
 FREIGHT_PER_BBL_NM = 3.9e-4  # USD / (barrel·nm)
-ETS_EUR = 81.24  # gas_EU_ETS_탄소가격.csv latest annual avg (€/ton)
-EUR_KRW = 1450  # FX for carbon value conversion
+ETS_EUR = 81.24  # gas_EU_ETS_탄소가격.csv의 최신 연평균 — ⚠ 해당 CSV는 2022년에서 끝난다(4년 경과)
+ETS_EUR_VINTAGE = "2022"  # 위 값의 기준연도. UI에 노출해 최신값으로 오인하지 않게 한다
+
+# 환율 — 2026-08-28 FRED 실측 (DEXKOUS 1,379.41 · DEXUSEU 1.1598)
+# ⚠ 종전 코드는 EUR_KRW=1450 하나로 **USD 금액까지** 환산했다(운임·수수료). 두 오류가 겹쳐 있었다:
+#    ① EUR/KRW 값 자체가 틀림(실측 1,599.7)  ② USD 금액에 EUR 환율을 적용
+USD_KRW = 1379.41
+EUR_KRW = 1599.66  # = 1379.41 × 1.1598
 
 # Market impact model (adjustable)
 BASE_ROUTE_NM = 6400  # safe import baseline: Middle East -> Korea
-CRUDE_PRICE_USD = 73.0  # benchmark crude price ($/bbl)
+CRUDE_PRICE_USD = 73.0  # 폴백값. 실제로는 latest_benchmark_price()로 데이터에서 읽는다
 STRUCTURING_FEE_RATE = 0.005  # structuring fee on swapped volume
 TON_PER_TREE = 0.022  # annual CO2 uptake per tree (ton)
 TON_PER_CAR = 4.6  # annual CO2 emissions per passenger car (ton)
@@ -211,8 +217,15 @@ def market_impact(
     fee_rate: float = STRUCTURING_FEE_RATE,
     ets_eur: float = ETS_EUR,
     eur_krw: float = EUR_KRW,
+    usd_krw: float = USD_KRW,
+    crude_price_usd: float | None = None,
 ) -> dict:
-    """Annual market size and ESG impact aggregated from country imports."""
+    """Annual market size and ESG impact aggregated from country imports.
+
+    통화 주의 — 탄소가치는 **유로**(EU ETS), 운임·수수료는 **달러**다.
+    각각 다른 환율로 환산해야 한다.
+    """
+    crude_price_usd = CRUDE_PRICE_USD if crude_price_usd is None else float(crude_price_usd)
     df = countries[countries["연도"] == year]
     total_vol = swap_vol = co2 = freight_usd = carbon_krw = fee_usd = 0.0
     per_country: list[dict] = []
@@ -236,19 +249,19 @@ def market_impact(
 
         if saved > 0:
             swap_vol += volume_bbl
-            fee_usd += volume_bbl * CRUDE_PRICE_USD * fee_rate
+            fee_usd += volume_bbl * crude_price_usd * fee_rate
             per_country.append(
                 {
                     "국가": row["국가"],
                     "물량_배럴": volume_bbl,
                     "거리절감_nm": saved,
                     "탄소절감_t": country_co2,
-                    "가치_원": country_carbon_krw + country_freight_usd * eur_krw,
+                    "가치_원": country_carbon_krw + country_freight_usd * usd_krw,
                 }
             )
 
-    freight_krw = freight_usd * eur_krw
-    fee_krw = fee_usd * eur_krw
+    freight_krw = freight_usd * usd_krw   # 운임은 달러 → USD/KRW
+    fee_krw = fee_usd * usd_krw           # 수수료도 달러 → USD/KRW
     per_country_df = pd.DataFrame(per_country)
     if not per_country_df.empty:
         per_country_df = per_country_df.sort_values("가치_원", ascending=False).reset_index(drop=True)
@@ -294,8 +307,11 @@ def model_validation(
         weighted_sum += p_ref * quality_adj(row["국가"]) * (1 - geo_discount(row["국가"])) * v
         total_vol += v
     model_price = weighted_sum / total_vol if total_vol else 0.0
+    multiplier = (model_price / p_ref) if p_ref else float("nan")
     return {
         "model_price": model_price,
+        "benchmark_price": p_ref,
+        "multiplier": multiplier,
         "fob_ref": PETRONET_FOB_REF,
         "cif_ref": PETRONET_CIF_REF,
         "fob_err_pct": (model_price - PETRONET_FOB_REF) / PETRONET_FOB_REF * 100,

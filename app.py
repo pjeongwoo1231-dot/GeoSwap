@@ -11,7 +11,9 @@ from src.ai_brief import generate_briefing
 from src.engine import (
     BENCHMARKS,
     COUNTRY_BENCHMARK,
+    ETS_EUR_VINTAGE,
     EUR_KRW,
+    USD_KRW,
     ETS_EUR,
     FREIGHT_PER_BBL_NM,
     GRADE_TO_DISCOUNT,
@@ -40,6 +42,7 @@ from src.chokepoints import (
     KAZAKH_CHAIN,
     alternatives,
     concentration_risk,
+    esg_risk_tradeoff,
     exposure,
     serial_dependency,
 )
@@ -537,7 +540,7 @@ def tab_esg_savings(eu_ets: pd.DataFrame):
             f"절감 {metrics['distance_saved_nm']:,.0f} nm)\n"
             f"- **탄소계수**: ≈0.3 g CO₂/(배럴·해리) — IMO VLCC 벙커유 소비 근사\n"
             f"- **운임계수**: ${FREIGHT_PER_BBL_NM} / (배럴·해리)\n"
-            f"- **탄소가격**: 한국가스공사 제공 EU ETS €{ets_eur:.2f}/톤 × ₩{EUR_KRW:,}/€"
+            f"- **탄소가격**: 한국가스공사 제공 EU ETS €{ets_eur:.2f}/톤 (**{ETS_EUR_VINTAGE}년 연평균**) × ₩{EUR_KRW:,.0f}/€"
         )
 
 
@@ -573,12 +576,19 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.
             format="%.2f",
         )
 
+    # 수수료 산출에 쓰는 유종가를 하드코딩 대신 **데이터의 최신 관측치**로 쓴다
+    _px = prices.dropna(subset=["Dubai"]).sort_values("연월")
+    _crude = float(_px.iloc[-1]["Dubai"]) if len(_px) else None
+    _crude_ym = str(_px.iloc[-1]["연월"]) if len(_px) else "—"
+
     impact = market_impact(
         countries,
         year=int(year),
         fee_rate=fee_rate,
         ets_eur=ets_eur,
         eur_krw=EUR_KRW,
+        usd_krw=USD_KRW,
+        crude_price_usd=_crude,
     )
     swap_share_pct = (
         impact["스왑대상물량"] / impact["총물량"] * 100 if impact["총물량"] else 0.0
@@ -660,6 +670,15 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.
         "가스(한국가스공사)·타 수입국·누적 적용 시 **수조 원 규모**로 확대될 수 있습니다."
     )
 
+    st.error(
+        "**⚠ 이 탭의 최적 방향은 「🚢 초크포인트 노출」 탭과 정반대다.**  "
+        "ESG 모형은 항로가 짧은 **중동(6,400nm)**으로 갈수록 좋다고 말한다. "
+        "그런데 중동은 **호르무즈와 말라카를 모두** 지나야 하는, 관문 노출이 가장 큰 산지다. "
+        "미국은 항로가 1.5배(9,500nm) 길지만 **관문을 하나도 지나지 않는다**(태평양 항로).  "
+        "→ **탄소를 최소화하는 조달 구조가 관문 리스크를 최대화한다.** "
+        "두 목표는 같은 방향이 아니며, 이 상충을 모르고 ESG 수치만 보면 위험한 결론에 이른다."
+    )
+
     with st.expander("가정·계산 근거 (방어용)"):
         st.markdown(
             f"- **거리**: sea-distances.org 기반 근사, 안전 인도 기준 {6400:,} nm (중동→한국)\n"
@@ -673,7 +692,7 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.
 
     st.divider()
     v = model_validation(countries, prices)
-    st.subheader("✅ 모델 검증 — 공공데이터 대조")
+    st.subheader("가격 패스스루 정합성 확인 — 공공데이터 대조")
     c1, c2, c3 = st.columns(3)
     c1.metric("모델 추정 도입가", f"${v['model_price']:.2f}")
     c2.metric("페트로넷 실제 FOB", f"${v['fob_ref']:.2f}", f"오차 {v['fob_err_pct']:+.1f}%", delta_color="off")
@@ -701,10 +720,20 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.
     )
     st.plotly_chart(fig_val, use_container_width=True)
     st.caption(
-        f"본 모델이 산출한 수입량 가중평균 도입가가 페트로넷 실제 **FOB와 {abs(v['fob_err_pct']):.1f}% 이내로 일치** "
-        f"→ 공공데이터로 모델 타당성 검증. CIF와의 차이(약 {abs(v['cif_err_pct']):.1f}%)는 **운임 성분**으로, "
-        f"이는 ESG 탭의 운임 절감 모델과 정합한다. "
+        f"수입량 가중평균 도입가가 페트로넷 실제 FOB와 **{abs(v['fob_err_pct']):.2f}%** 차이. "
+        f"CIF와의 차이({abs(v['cif_err_pct']):.1f}%)는 **운임 성분**이며 ESG 탭의 운임 모델과 정합한다. "
         f"(기준: {v['period']}, 도입가는 운임 미포함 spot 기준)"
+    )
+    st.warning(
+        "**이것을 '모델 검증'이라 부르지 않는다.** 이 모델의 수입량 가중 배수는 "
+        f"**{v['multiplier']:.4f}** — 즉 산출가는 사실상 **Dubai의 패스스루**다. "
+        "따라서 도입가 지수와 맞는 것은 당연하며, **품질보정·신용할인이 옳다는 증거가 되지 못한다.** "
+        "가격 스케일이 어긋나지 않았다는 **정합성 확인**으로만 읽어야 한다."
+    )
+    st.success(
+        "**이 서비스의 실제 검증은 「⚡ 국면 판정」 탭에 있다.** "
+        "2022 우크라이나(생산자 충격)와 2026 호르무즈(수송로 충격)라는 **두 독립 사건**에서 "
+        "국면 분류가 각각 맞았고, 분류기는 2022 사건에 맞춰 조정된 적이 없다."
     )
 
 
@@ -1225,6 +1254,20 @@ def tab_chokepoints(countries):
     st.dataframe(
         pd.DataFrame(a["상위_대체산지"], columns=["산지", "물량_천배럴"]),
         hide_index=True, use_container_width=True,
+    )
+
+    st.divider()
+    st.subheader("탄소와 관문은 같은 방향이 아니다")
+    st.markdown(
+        "「🌱 ESG 절감」 탭은 항로가 짧을수록 좋다고 말한다. "
+        "그런데 **가장 가까운 산지가 관문이 가장 많다.**"
+    )
+    st.dataframe(esg_risk_tradeoff(countries, year), hide_index=True, use_container_width=True)
+    st.error(
+        "**중동 6,400nm — 관문 2개(호르무즈·말라카).  미국 9,500nm — 관문 0개.**  "
+        "탄소를 최소화하는 조달 구조가 관문 리스크를 최대화한다. "
+        "**두 탭의 최적해가 반대**라는 사실을 숨기지 않는다 — "
+        "조달 의사결정은 이 상충 위에서 내려야 한다."
     )
 
     st.divider()

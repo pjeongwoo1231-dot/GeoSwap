@@ -209,3 +209,39 @@ def concentration_risk(countries: pd.DataFrame, year: int) -> dict:
         "순노출비중": float(worst["순노출비중"]),
         "순노출_천배럴": int(worst["순노출_천배럴"]),
     }
+
+
+# ── ESG ↔ 관문 리스크 상충 ──────────────────────────────────────────────────
+def chokepoints_for_origin(origin: str) -> list[str]:
+    """해당 산지에서 한국까지 오며 지나는 관문 목록."""
+    return [cp.name for cp in CHOKEPOINTS if origin in cp.origins]
+
+
+def esg_risk_tradeoff(countries: pd.DataFrame, year: int) -> pd.DataFrame:
+    """탄소 최적 조달과 관문 분산은 **반대 방향**이라는 것을 보인다.
+
+    ESG 모형은 '중동(6,400nm)에 가까울수록 좋다'고 말한다 — 항로가 짧으니 탄소가 준다.
+    그런데 중동은 **호르무즈와 말라카를 모두** 지나야 하는, 관문 노출이 가장 큰 산지다.
+    반대로 미국은 항로가 1.5배 길지만 **관문을 하나도 지나지 않는다**(태평양 항로).
+
+    → **탄소를 최소화하는 조달 구조가 관문 리스크를 최대화한다.**
+    두 목표는 같은 방향이 아니며, 이 상충을 숨기면 ESG 탭이 위험한 조언이 된다.
+    """
+    from .engine import ROUTE_NM, COUNTRY_TO_ROUTE
+
+    vols = _year_volumes(countries, year)
+    rows = []
+    for origin, v in sorted(vols.items(), key=lambda kv: -kv[1]):
+        if v <= 0:
+            continue
+        region = COUNTRY_TO_ROUTE.get(origin)
+        dist = ROUTE_NM.get(region) if region else None
+        gates = chokepoints_for_origin(origin)
+        rows.append({
+            "산지": origin,
+            "도입물량_천배럴": round(v),
+            "항로거리_nm": f"{dist:,}" if dist else "미분류",
+            "통과 관문 수": len(gates),
+            "통과 관문": ", ".join(gates) if gates else "없음 (태평양 항로)",
+        })
+    return pd.DataFrame(rows).head(12)
