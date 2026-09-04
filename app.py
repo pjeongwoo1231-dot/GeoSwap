@@ -35,6 +35,18 @@ from src.engine import (
     quality_adj,
     resolve_benchmark,
 )
+from src.shocks import (
+    KAPPA,
+    KAPPA_RANGE,
+    benchmark_dispersion,
+    classify_shock,
+    country_gpr_innovation,
+    credit_discount,
+    gpr_coverage,
+    monthly_series_v2,
+    scarcity_premium,
+    swap_rate_band,
+)
 
 DATA_SOURCE_FOOTER = (
     "데이터: 산업통상부 — 한국석유공사(국가별·유질별 원유수입·국제유가) · "
@@ -758,6 +770,47 @@ def tab_swap_calculator(prices):
         geo_discount_a=discount_a,
         geo_discount_b=discount_b,
     )
+
+    # ── v2: 국면 판정 + 밴드 ────────────────────────────────────────────────
+    verdict = classify_shock(prices, selected_month)
+    band = swap_rate_band(
+        name_a, float(selected_row[bench_a]),
+        name_b, float(selected_row[bench_b]),
+        selected_month, verdict,
+    )
+    prem_b = scarcity_premium(name_b, selected_month, verdict)
+    prem_a = scarcity_premium(name_a, selected_month, verdict)
+
+    badge = {
+        "regional_supply": "🔴", "aggregate_demand": "🟡", "quiet": "🟢",
+        "undetermined": "⚪", "no_data": "⚫",
+    }[verdict.kind]
+    st.markdown(
+        f"#### {badge} 국면 판정 — **{verdict.label}** (신뢰도 {verdict.confidence})"
+    )
+    vc1, vc2, vc3 = st.columns(3)
+    vc1.metric(
+        "스왑비율 (v2)", f"{band['mid']:.3f}",
+        help="벤치마크 × 품질보정 × (1−신용할인) × (1+희소성 프리미엄)",
+    )
+    vc2.metric("불확실성 밴드", f"{band['low']:.3f} ~ {band['high']:.3f}",
+               help="κ 파라미터 불확실성 전파. 표본오차가 아니다.")
+    vc3.metric(
+        f"{name_b} 희소성 프리미엄", f"{prem_b:+.1%}" if prem_b else "미부과",
+        help="지역 공급·예비적 충격일 때만 부과된다. 총수요 충격에는 부과하지 않는다.",
+    )
+    if verdict.kind == "aggregate_demand":
+        st.info("두 벤치마크가 함께 움직인 국면이다 — **교환비율이 거의 바뀌지 않으므로 스왑 유인이 낮다.** (Kilian·Park 2009)")
+    elif verdict.kind == "regional_supply":
+        st.error("산지가 갈라진 국면이다 — **스왑 유인이 최대**인 구간.")
+    elif verdict.kind in ("undetermined", "no_data"):
+        st.warning("희소성 프리미엄을 부과하지 않았다. 지정학 사건 대부분은 가격으로 전이되지 않는다(Kilian 2008).")
+    with st.expander("판정 근거 보기"):
+        for e in verdict.evidence:
+            st.markdown(f"- {e}")
+        for cav in verdict.caveats:
+            st.caption(f"⚠ {cav}")
+    st.divider()
     quality_a = 1.0 if name_a in BENCHMARKS else float(quality_adj(name_a))
     quality_b = 1.0 if name_b in BENCHMARKS else float(quality_adj(name_b))
     effective_a = float(selected_row[bench_a]) * quality_a * (1 - discount_a)
@@ -870,6 +923,13 @@ def tab_swap_calculator(prices):
                 volume_bbl,
                 co2_saved,
                 freight_saved,
+                shock_label=verdict.label,
+                shock_confidence=verdict.confidence,
+                shock_innovation=None if pd.isna(verdict.innovation) else float(verdict.innovation),
+                dispersion_z=float(verdict.dispersion_z),
+                scarcity_prem_b=float(prem_b),
+                band_low=float(band["low"]),
+                band_high=float(band["high"]),
             )
         if text is None:
             st.info(
@@ -920,6 +980,131 @@ def tab_geopolitical_risk(countries):
     st.dataframe(load_oil_mining_risk(), use_container_width=True)
 
 
+def tab_shock_regime(prices):
+    st.header("⚡ 충격 유형 판정")
+    st.markdown(
+        "**\u201c유가가 얼마나 올랐나\u201d는 정보가 아니다. \u201c왜 올랐나\u201d가 정보다.** "
+        "같은 크기의 상승이라도 원인이 다르면 산지 간 교환비율에 미치는 영향이 정반대가 된다"
+        "(Kilian & Park 2009). 이 탭은 매월의 국면을 관측 가능한 신호만으로 분류한다."
+    )
+
+    cov_lo, cov_hi = gpr_coverage()
+    month_options = prices["연월"].dropna().sort_values().unique().tolist()
+    default_idx = month_options.index("2026-03") if "2026-03" in month_options else len(month_options) - 1
+    month = st.select_slider("판정 기준 월", options=month_options, value=month_options[default_idx])
+
+    v = classify_shock(prices, month)
+    disp = benchmark_dispersion(prices, month)
+
+    tone = {
+        "regional_supply": ("🔴", "error"),
+        "aggregate_demand": ("🟡", "warning"),
+        "quiet": ("🟢", "success"),
+        "undetermined": ("⚪", "info"),
+        "no_data": ("⚫", "info"),
+    }[v.kind]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("판정", f"{tone[0]} {v.label}")
+    c2.metric("신뢰도", v.confidence)
+    c3.metric(
+        "지정학 혁신 z",
+        "관측없음" if pd.isna(v.innovation) else f"{v.innovation:+.2f}",
+        help="log(1+GPR)의 AR(5) 잔차. 수준이 아니라 '예상 밖의 정도'를 잰다.",
+    )
+    c4.metric(
+        "벤치마크 분기 z",
+        f"{v.dispersion_z:+.1f}σ",
+        help="Brent−Dubai 스프레드가 평시 분포(중위수·MAD)에서 벗어난 정도.",
+    )
+
+    getattr(st, tone[1])(f"**{v.label}** — 신뢰도 {v.confidence}")
+
+    st.subheader("판정 근거")
+    for e in v.evidence:
+        st.markdown(f"- {e}")
+    for cav in v.caveats:
+        st.warning(cav)
+
+    st.divider()
+    st.subheader("이 판정이 가격에 하는 일")
+    st.markdown(
+        "지정학은 **부호가 반대인 두 성분**으로 나뉜다. v1 엔진은 앞의 것만 갖고 있었다."
+    )
+    comp = pd.DataFrame(
+        [
+            {
+                "성분": "신용·인도 할인 (−)",
+                "성격": "구조적 (K-SURE 국가등급)",
+                "의미": "상대방·인도 리스크를 진 산지는 싸게 팔린다 (Urals형)",
+                "국면 의존": "없음 — 항상 적용",
+            },
+            {
+                "성분": "희소성 프리미엄 (+)",
+                "성격": "국면적 (지정학 혁신 × κ)",
+                "의미": "봉쇄·차질에 걸린 산지는 비싸게 팔린다 (호르무즈형)",
+                "국면 의존": "**지역 충격일 때만** 적용",
+            },
+        ]
+    )
+    st.dataframe(comp, hide_index=True, use_container_width=True)
+
+    st.caption(
+        f"κ = {KAPPA:.3f} (2026-03 실측 캘리브레이션: Dubai 프리미엄 29.0% ÷ 혁신 z 3.42). "
+        f"밴드 κ ∈ [{KAPPA_RANGE[0]:.3f}, {KAPPA_RANGE[1]:.3f}] — 표본오차가 아니라 파라미터 불확실성이다."
+    )
+
+    st.divider()
+    st.subheader("국면 시계열 — 언제 프리미엄이 켜졌나")
+    series = monthly_series_v2(prices, "카자흐스탄", "사우디아라비아")
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(
+            x=series["연월"], y=series["스왑비율"], name="스왑비율 (카자흐→사우디)",
+            mode="lines+markers", line=dict(color="#0F766E", width=3),
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=list(series["연월"]) + list(series["연월"])[::-1],
+            y=list(series["상한"]) + list(series["하한"])[::-1],
+            fill="toself", fillcolor="rgba(15,118,110,0.13)",
+            line=dict(width=0), name="κ 불확실성 밴드", hoverinfo="skip",
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=series["연월"], y=series["희소성프리미엄_B"],
+            name="사우디 희소성 프리미엄", marker_color="#C62828", opacity=0.45,
+        ),
+        secondary_y=True,
+    )
+    fig.add_hline(y=1.0, line_dash="dot", line_color="#94A3B8", secondary_y=False)
+    fig.update_yaxes(title_text="스왑비율", secondary_y=False)
+    fig.update_yaxes(title_text="희소성 프리미엄", secondary_y=True, rangemode="tozero")
+    fig.update_layout(height=430, margin=dict(t=30, b=10), legend=dict(orientation="h", y=1.12))
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.subheader("월별 판정 이력")
+    show = series.copy()
+    show["스왑비율"] = show["스왑비율"].round(3)
+    show["밴드"] = show.apply(lambda r: f"{r['하한']:.3f} ~ {r['상한']:.3f}", axis=1)
+    st.dataframe(
+        show[["연월", "충격유형", "신뢰도", "지정학혁신", "스프레드z", "희소성프리미엄_B", "스왑비율", "밴드"]].tail(18),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    st.info(
+        f"**지정학지수 보유 구간: {cov_lo} ~ {cov_hi}.** "
+        "그 이후 월은 가격 신호가 있어도 **판정불가**로 처리하고 프리미엄을 부과하지 않는다 — "
+        "결측을 '평온'으로 읽지 않기 위한 규칙이다."
+    )
+
 def main():
     st.set_page_config(
         page_title="Geo-Swap",
@@ -963,12 +1148,13 @@ def main():
         f"K-SURE 국가등급 2026-02 · 원유 수입 {int(countries['연도'].max())}(연간 확정통계)"
     )
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+    tab1, tab2, tab3, tab4, tab9, tab5, tab6, tab7, tab8 = st.tabs(
         [
             "📊 원유 수입 구조",
             "🛢️ 유질 구성",
             "💵 국제유가 & 스프레드",
             "⭐ 석유 환율 계산기",
+            "⚡ 충격 유형 판정",
             "🔍 심층분석",
             "🌱 ESG 절감",
             "📈 시장규모·임팩트",
@@ -984,6 +1170,8 @@ def main():
         tab_oil_prices(prices)
     with tab4:
         tab_swap_calculator(prices)
+    with tab9:
+        tab_shock_regime(prices)
     with tab5:
         tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades)
     with tab6:
