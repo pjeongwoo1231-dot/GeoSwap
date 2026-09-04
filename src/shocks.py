@@ -81,6 +81,11 @@ def _load_gpr_real() -> pd.DataFrame:
     return df
 
 
+def load_gpr_real() -> pd.DataFrame:
+    """진본 GPR 원본 프레임 (UI에서 직접 그릴 때 사용)."""
+    return _load_gpr_real()
+
+
 def gpr_source() -> str:
     return "진본 GPR (Caldara & Iacoviello 2022, AER)" if not _load_gpr_real().empty else "AI-GPR (자체 생성)"
 
@@ -177,6 +182,15 @@ def _one_inv(df: pd.DataFrame, key: str | None) -> dict | None:
         return None
     mom = float(row.iloc[0]["전월비_pct"])
     return {"mom": mom, "vs_norm": float(row.iloc[0]["평년대비_pct"]), "dir": _dir_of(mom)}
+
+
+def inventory_coverage() -> str:
+    """재고 계열이 보유한 마지막 월 (OECD 우선)."""
+    for name in (OECD_INVENTORY_CSV, US_INVENTORY_CSV):
+        df = _load_inv(name)
+        if not df.empty and "연월" in df.columns:
+            return str(df["연월"].dropna().sort_values().iloc[-1])
+    return "관측없음"
 
 
 def inventory_signal(t) -> dict:

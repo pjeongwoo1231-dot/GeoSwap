@@ -18,7 +18,6 @@ from src.engine import (
     HIGH_RISK_COUNTRIES,
     STRUCTURING_FEE_RATE,
     country_grade,
-    country_gpr_stress,
     country_quality_specs,
     country_year_totals,
     esg_swap_metrics,
@@ -43,15 +42,19 @@ from src.shocks import (
     delivery_discount,
     gpr_coverage,
     gpr_source,
+    load_gpr_real,
+    inventory_coverage,
     inventory_signal,
     monthly_regime_series,
 )
 
 DATA_SOURCE_FOOTER = (
-    "데이터: 산업통상부 — 한국석유공사(국가별·유질별 원유수입·국제유가) · "
+    "데이터: 산업통상부 — 한국석유공사(국가별·유질별 원유수입, KOSIS TX_31801_A008·A009) · "
     "한국무역보험공사(국가신용등급) · 한국가스공사(EU ETS 탄소가격) | "
-    "연계: EIA(원유품질 API·황), GPR 지정학지수 | "
-    "운송거리(sea-distances 근사)·탄소계수(IMO) 기반 ESG 추정 | "
+    "국제유가: World Bank Pink Sheet(Brent·Dubai·WTI) | "
+    "지정학위험지수: Caldara & Iacoviello (2022, AER) | "
+    "원유재고: 미국 EIA (OECD 상업재고 · 미국 상업재고) | "
+    "연계: EIA(원유품질 API·황) | 운송거리(sea-distances 근사)·탄소계수(IMO) 기반 ESG 추정 | "
     "모델 검증: 페트로넷 CIF 도입단가"
 )
 
@@ -301,7 +304,15 @@ def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
     year = st.slider("버블 기준 연도", min_value=min(years), max_value=max(years), value=max(years))
 
     # 1) GPR ↔ 수입 상관
-    gpr_df = gpr_region_monthly[["Date", "GPR_OIL_Russia"]].copy()
+    # 진본 GPR (Caldara & Iacoviello 2022) 사용. 폐기된 AI-GPR을 쓰지 않는다.
+    _gr = load_gpr_real()
+    if not _gr.empty and "GPR_REAL_Russia" in _gr.columns:
+        gpr_df = _gr[["Date", "GPR_REAL_Russia"]].rename(columns={"GPR_REAL_Russia": "GPR_OIL_Russia"}).copy()
+        gpr_df["Date"] = pd.to_datetime(gpr_df["Date"])
+        _gpr_label = "진본 GPR — 러시아 (Caldara & Iacoviello 2022)"
+    else:
+        gpr_df = gpr_region_monthly[["Date", "GPR_OIL_Russia"]].copy()
+        _gpr_label = "GPR — 러시아"
     rus_import = (
         countries[countries["국가"] == "러시아"]
         .groupby("연도", as_index=False)["물량_천배럴"]
@@ -317,7 +328,7 @@ def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
             x=gpr_df["Date"],
             y=gpr_df["GPR_OIL_Russia"],
             mode="lines",
-            name="GPR_OIL_Russia (월별)",
+            name=_gpr_label,
             line=dict(color="#1f77b4", width=2.5),
         ),
         secondary_y=False,
@@ -366,7 +377,7 @@ def tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades):
         legend=dict(orientation="h", y=-0.2),
     )
     fig_corr.update_yaxes(
-        title_text="GPR_OIL_Russia",
+        title_text="지정학위험지수 (러시아)",
         range=[0, gpr_max * 1.15],
         secondary_y=False,
     )
@@ -724,16 +735,22 @@ def tab_swap_calculator(prices):
     )
     selected_row = prices.loc[prices["연월"] == selected_month].iloc[-1]
 
-    st.subheader("지정학 할인율 직접 조정")
+    st.subheader("구조적 신용 할인율 직접 조정")
+    st.caption(
+        "기본값은 **K-SURE 국가등급**만으로 정해진 구조적 할인이다. "
+        "국면에 따른 좌초 할인은 벤치마크 가격에 이미 반영돼 있으므로 여기에 다시 곱하지 않는다(이중계상 방지)."
+    )
     grade_a = country_grade(name_a)
     grade_b = country_grade(name_b)
-    discount_a_basis = float(geo_discount(name_a, selected_month))
-    discount_b_basis = float(geo_discount(name_b, selected_month))
+    # v3: 구조적 신용 할인은 K-SURE 등급만으로 정한다.
+    # 국면에 따른 좌초 할인은 벤치마크 가격에 이미 들어 있으므로 여기서 다시 곱하지 않는다.
+    discount_a_basis = float(credit_discount(name_a))
+    discount_b_basis = float(credit_discount(name_b))
     discount_b_default = discount_b_basis
     disc_col_a, disc_col_b = st.columns(2)
     with disc_col_a:
         discount_a = st.slider(
-            f"{name_a} 할인율",
+            f"{name_a} 신용 할인율",
             0.0,
             0.30,
             discount_a_basis,
@@ -742,7 +759,7 @@ def tab_swap_calculator(prices):
         )
     with disc_col_b:
         discount_b = st.slider(
-            f"{name_b} 할인율",
+            f"{name_b} 신용 할인율",
             0.0,
             0.30,
             discount_b_default,
@@ -904,13 +921,15 @@ def tab_swap_calculator(prices):
     api_a = api_a if api_a is not None else 0.0
     sulfur_a = sulfur_a if sulfur_a is not None else 0.0
     grade_a_val = grade_a if grade_a is not None else 0
-    gpr_stress_a = country_gpr_stress(name_a, selected_month)
+    gpr_stress_a = country_gpr_innovation(name_a, selected_month)
+    if gpr_stress_a != gpr_stress_a:  # NaN
+        gpr_stress_a = 0.0
 
     st.divider()
     st.subheader("🤖 AI 지정학 브리핑")
     st.caption(
         "Gemini가 공공데이터 지표를 해석해 스왑 추천을 생성합니다. "
-        "지정학지수는 LLM 생성 데이터(AI-GPR) 기반."
+        "국면 판정 결과를 먼저 읽고 국면별 규칙에 따라 실행/관망을 판단합니다."
     )
     if st.button("브리핑 생성"):
         with st.spinner("AI가 지정학 리스크를 분석 중…"):
@@ -1146,7 +1165,8 @@ def main():
 
     st.caption(
         f"🟢 데이터 최신성 — 국제유가 {prices['연월'].max()} · "
-        f"지정학(AI-GPR) {gpr_region_monthly['연월'].max()} · "
+        f"지정학지수 {gpr_coverage()[1]} · "
+        f"원유재고 {inventory_coverage()} · "
         f"K-SURE 국가등급 2026-02 · 원유 수입 {int(countries['연도'].max())}(연간 확정통계)"
     )
 
