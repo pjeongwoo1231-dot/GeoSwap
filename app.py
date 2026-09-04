@@ -34,6 +34,15 @@ from src.engine import (
     quality_adj,
     resolve_benchmark,
 )
+from src.chokepoints import (
+    BYPASS_SHARE,
+    CHOKEPOINTS,
+    KAZAKH_CHAIN,
+    alternatives,
+    concentration_risk,
+    exposure,
+    serial_dependency,
+)
 from src.shocks import (
     SPREAD_SHOCK_PP,
     classify_regime,
@@ -1126,6 +1135,115 @@ def tab_shock_regime(prices):
     )
 
 
+
+def tab_chokepoints(countries):
+    st.header("🚢 초크포인트 노출")
+    st.markdown(
+        "가격 신호는 **호르무즈 하나만** 잡는다. 나머지 관문에는 공개 가격 계열이 없다. "
+        "그래서 가격이 없는 곳은 **노출 구조**로 잡는다 — "
+        "*막히면 얼마가 묶이나*. 추정이 아니라 **도입 실적에 경로를 대입한 산술**이다."
+    )
+
+    years = sorted(countries["연도"].unique())
+    year = st.select_slider("기준 연도", options=years, value=max(years))
+
+    st.subheader("우회 능력 가정 (조정 가능)")
+    st.caption(
+        "각국 총수출 대비 '호르무즈를 피해 내보낼 수 있는 비율'. "
+        "**추정된 계수가 아니라 명시적 가정**이므로 직접 바꿔볼 수 있게 열어 둔다."
+    )
+    cols = st.columns(3)
+    byp = dict(BYPASS_SHARE)
+    for i, k in enumerate(["사우디아라비아", "아랍에미리트", "이라크"]):
+        with cols[i]:
+            byp[k] = st.slider(f"{k} 우회비율", 0.0, 1.0, float(BYPASS_SHARE[k]), 0.05)
+
+    e = exposure(countries, year, bypass=byp)
+    worst = e.loc[e["순노출비중"].idxmax()]
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("최대 노출 관문", worst["관문"], f"순노출 {worst['순노출비중']:.1f}%")
+    hz = e[e["관문"] == "호르무즈 해협"].iloc[0]
+    m2.metric("호르무즈 순노출", f"{hz['순노출비중']:.1f}%", f"통과 {hz['통과비중']:.1f}%")
+    m3.metric("가격 신호 보유 관문", f"1 / {len(CHOKEPOINTS)}", "나머지는 노출로 측정")
+
+    if worst["관문"] != "호르무즈 해협":
+        st.error(
+            f"**한국의 최대 관문은 호르무즈가 아니라 「{worst['관문']}」이다.** "
+            f"순노출 **{worst['순노출비중']:.1f}%** (호르무즈 {hz['순노출비중']:.1f}%). "
+            "호르무즈는 파이프라인 우회로가 있지만, 이 관문에는 **파이프라인 대체가 아예 없다** — "
+            "더 긴 해상 항로뿐이다."
+        )
+
+    st.dataframe(e, hide_index=True, use_container_width=True)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=e["관문"], y=e["우회가능_천배럴"], name="우회 가능", marker_color="#94A3B8"))
+    fig.add_trace(go.Bar(x=e["관문"], y=e["순노출_천배럴"], name="순노출", marker_color="#C62828"))
+    fig.update_layout(barmode="stack", height=380, margin=dict(t=30, b=10),
+                      yaxis_title="천 배럴", legend=dict(orientation="h", y=1.12))
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.subheader("우회로는 공짜가 아니다 — 직렬 의존")
+    st.markdown(
+        "호르무즈를 피하는 사우디 East-West 파이프라인은 **얀부(홍해)로 나온다.** "
+        "그리고 얀부에서 동아시아로 가려면 **바브엘만데브를 지나야 한다.** "
+        "우회로가 또 다른 관문으로 들어가는 것을 직렬 의존이라 한다."
+    )
+    st.dataframe(serial_dependency(countries, year), hide_index=True, use_container_width=True)
+    st.warning(
+        "**따라서 「호르무즈 우회 가능 물량」을 안전물량으로 세면 안 된다.** "
+        "사우디 우회분은 바브엘만데브로 나오고, 그 뒤에도 **말라카가 남아 있다.**"
+    )
+
+    st.divider()
+    st.subheader("관문이 막혔을 때 남는 것 — 대체 산지")
+    key = st.selectbox(
+        "관문 선택",
+        [c.key for c in CHOKEPOINTS],
+        format_func=lambda k: next(c.name for c in CHOKEPOINTS if c.key == k),
+    )
+    a = alternatives(countries, year, key)
+    cp = a["관문"]
+    st.info(f"**{cp.name}** ({cp.eng}) — {cp.note}")
+    st.caption(f"우회 경로: {cp.bypass_note or '없음'}  ·  가격 신호: {cp.price_signal or '없음 (노출로 측정)'}")
+
+    a1, a2, a3 = st.columns(3)
+    a1.metric("영향 없는 물량", f"{a['안전물량_천배럴']:,} 천배럴", f"{a['안전비중']}%")
+    a2.metric("대체 산지 HHI", f"{a['대체산지_HHI']:,}",
+              help="1,500 미만 분산 · 2,500 초과 고집중. 대체처가 한 곳에 쏠려 있으면 그것도 리스크다.")
+    a3.metric("최대 대체 산지", a["상위_대체산지"][0][0] if a["상위_대체산지"] else "—",
+              f"{a['상위_대체산지'][0][1]:,.0f} 천배럴" if a["상위_대체산지"] else None)
+
+    if a["대체산지_HHI"] >= 2500:
+        st.warning(
+            f"**대체 산지도 집중돼 있다 (HHI {a['대체산지_HHI']:,}).** "
+            "관문이 막혔을 때 기댈 곳이 몇 군데뿐이라는 뜻이며, "
+            "그 자체가 2차 리스크다."
+        )
+    st.dataframe(
+        pd.DataFrame(a["상위_대체산지"], columns=["산지", "물량_천배럴"]),
+        hide_index=True, use_container_width=True,
+    )
+
+    st.divider()
+    st.subheader("카자흐 원유가 한국에 닿기까지 — 관문 사슬")
+    st.markdown(" → ".join(f"**{x}**" for x in KAZAKH_CHAIN))
+    st.error(
+        "**관문 넷과 타국 영토 하나를 지나야 실물이 온다.** CPC 파이프라인은 러시아 영토를 통과하고, "
+        "흑해로 나온 뒤 터키 해협·수에즈·바브엘만데브·말라카를 차례로 거친다." + chr(10) + chr(10) +
+        "**이것이 Geo-Swap이 존재하는 이유다.** 물리적 인도가 관문의 곱으로 어려워질수록, "
+        "「기름을 옮기지 않고 인도처를 맞바꾸는」 금융적 해법의 가치가 커진다. "
+        "카자흐 권리를 확보하되 실물은 걸프에서 받는 것 — 그것이 스왑이다."
+    )
+
+    st.caption(
+        "출처: 통과 산지·우회 경로는 지리적 사실, 물량은 한국석유공사 국가별 원유수입(KOSIS). "
+        "우회 비율은 파이프라인 공칭 용량 대비 수출량으로 잡은 **명시적 가정**이며 위 슬라이더에서 조정 가능하다."
+    )
+
+
 def main():
     st.set_page_config(
         page_title="Geo-Swap",
@@ -1170,13 +1288,14 @@ def main():
         f"K-SURE 국가등급 2026-02 · 원유 수입 {int(countries['연도'].max())}(연간 확정통계)"
     )
 
-    tab1, tab2, tab3, tab4, tab9, tab5, tab6, tab7, tab8 = st.tabs(
+    tab1, tab2, tab3, tab4, tab9, tab10, tab5, tab6, tab7, tab8 = st.tabs(
         [
             "📊 원유 수입 구조",
             "🛢️ 유질 구성",
             "💵 국제유가 & 스프레드",
             "⭐ 석유 환율 계산기",
-            "⚡ 충격 유형 판정",
+            "⚡ 국면 판정",
+            "🚢 초크포인트 노출",
             "🔍 심층분석",
             "🌱 ESG 절감",
             "📈 시장규모·임팩트",
@@ -1194,6 +1313,8 @@ def main():
         tab_swap_calculator(prices)
     with tab9:
         tab_shock_regime(prices)
+    with tab10:
+        tab_chokepoints(countries)
     with tab5:
         tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades)
     with tab6:
