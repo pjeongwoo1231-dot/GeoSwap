@@ -43,6 +43,7 @@ from src.shocks import (
     country_gpr_innovation,
     credit_discount,
     gpr_coverage,
+    inventory_signal,
     monthly_series_v2,
     scarcity_premium,
     swap_rate_band,
@@ -782,8 +783,8 @@ def tab_swap_calculator(prices):
     prem_a = scarcity_premium(name_a, selected_month, verdict)
 
     badge = {
-        "regional_supply": "🔴", "aggregate_demand": "🟡", "quiet": "🟢",
-        "undetermined": "⚪", "no_data": "⚫",
+        "supply_disruption": "🔴", "precautionary": "🔴", "regional_supply": "🔴",
+        "aggregate_demand": "🟡", "quiet": "🟢", "undetermined": "⚪", "no_data": "⚫",
     }[verdict.kind]
     st.markdown(
         f"#### {badge} 국면 판정 — **{verdict.label}** (신뢰도 {verdict.confidence})"
@@ -801,8 +802,15 @@ def tab_swap_calculator(prices):
     )
     if verdict.kind == "aggregate_demand":
         st.info("두 벤치마크가 함께 움직인 국면이다 — **교환비율이 거의 바뀌지 않으므로 스왑 유인이 낮다.** (Kilian·Park 2009)")
+    elif verdict.kind == "precautionary":
+        st.error(
+            "**예비적 수요 충격** — 재고가 쌓이면서 가격이 올랐다. Kilian·Park(2009) 기준 "
+            "**세 유형 중 자산가격에 유의한 음(−) 효과를 갖는 유일한 유형**이며, 스왑 유인도 최대다."
+        )
+    elif verdict.kind == "supply_disruption":
+        st.error("**물리적 공급교란** — 재고를 헐어 쓰고 있다. 스왑 유인이 크다.")
     elif verdict.kind == "regional_supply":
-        st.error("산지가 갈라진 국면이다 — **스왑 유인이 최대**인 구간.")
+        st.error("산지가 갈라진 국면이다 — **스왑 유인이 최대**인 구간. (재고 미관측으로 유형 미분리)")
     elif verdict.kind in ("undetermined", "no_data"):
         st.warning("희소성 프리미엄을 부과하지 않았다. 지정학 사건 대부분은 가격으로 전이되지 않는다(Kilian 2008).")
     with st.expander("판정 근거 보기"):
@@ -928,6 +936,8 @@ def tab_swap_calculator(prices):
                 shock_innovation=None if pd.isna(verdict.innovation) else float(verdict.innovation),
                 dispersion_z=float(verdict.dispersion_z),
                 scarcity_prem_b=float(prem_b),
+                inventory_dir=verdict.inventory_dir,
+                inventory_mom=None if pd.isna(verdict.inventory_mom) else float(verdict.inventory_mom),
                 band_low=float(band["low"]),
                 band_high=float(band["high"]),
             )
@@ -996,7 +1006,10 @@ def tab_shock_regime(prices):
     v = classify_shock(prices, month)
     disp = benchmark_dispersion(prices, month)
 
+    inv = inventory_signal(month)
     tone = {
+        "supply_disruption": ("🔴", "error"),
+        "precautionary": ("🔴", "error"),
         "regional_supply": ("🔴", "error"),
         "aggregate_demand": ("🟡", "warning"),
         "quiet": ("🟢", "success"),
@@ -1004,9 +1017,15 @@ def tab_shock_regime(prices):
         "no_data": ("⚫", "info"),
     }[v.kind]
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("판정", f"{tone[0]} {v.label}")
     c2.metric("신뢰도", v.confidence)
+    c5.metric(
+        "재고 방향",
+        inv["dir"] if inv["available"] else "관측없음",
+        f"{inv['mom']:+.1f}% MoM" if inv["available"] else None,
+        help="가격↑ + 재고 축적 = 예비적 수요 / 가격↑ + 재고 인출 = 물리적 공급교란 (Kilian 2009 식별)",
+    )
     c3.metric(
         "지정학 혁신 z",
         "관측없음" if pd.isna(v.innovation) else f"{v.innovation:+.2f}",
@@ -1025,6 +1044,26 @@ def tab_shock_regime(prices):
         st.markdown(f"- {e}")
     for cav in v.caveats:
         st.warning(cav)
+
+    st.divider()
+    st.subheader("재고가 가르는 두 유형 — Kilian(2009) 식별")
+    st.markdown(
+        "가격이 오른 것만으로는 **왜** 올랐는지 알 수 없다. 재고 방향이 그것을 가른다."
+    )
+    st.dataframe(
+        pd.DataFrame([
+            {"유형": "공급교란", "재고": "인출·정체", "뜻": "실제로 부족해서 보유분을 헐어 쓴다",
+             "자산가격 함의": "Kilian·Park(2009): 누적 주가수익률에 **유의한 효과 없음**"},
+            {"유형": "예비적 수요", "재고": "축적", "뜻": "장래 공급부족을 우려해 미리 사둔다",
+             "자산가격 함의": "**유의한 음(−)** — 세 유형 중 하방 리스크가 가장 큰 유형"},
+        ]),
+        hide_index=True, use_container_width=True,
+    )
+    if inv["available"]:
+        st.caption(
+            f"현재 월 재고 — 전월비 **{inv['mom']:+.2f}%**, 평년(2015~2024 동월 평균) 대비 **{inv['vs_norm']:+.1f}%** "
+            f"→ 방향 판정 **{inv['dir']}**"
+        )
 
     st.divider()
     st.subheader("이 판정이 가격에 하는 일")
@@ -1094,7 +1133,7 @@ def tab_shock_regime(prices):
     show["스왑비율"] = show["스왑비율"].round(3)
     show["밴드"] = show.apply(lambda r: f"{r['하한']:.3f} ~ {r['상한']:.3f}", axis=1)
     st.dataframe(
-        show[["연월", "충격유형", "신뢰도", "지정학혁신", "스프레드z", "희소성프리미엄_B", "스왑비율", "밴드"]].tail(18),
+        show[["연월", "충격유형", "신뢰도", "재고", "지정학혁신", "스프레드z", "희소성프리미엄_B", "스왑비율", "밴드"]].tail(24),
         hide_index=True,
         use_container_width=True,
     )

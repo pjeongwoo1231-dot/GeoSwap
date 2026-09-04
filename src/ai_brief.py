@@ -48,6 +48,8 @@ def generate_briefing(
     scarcity_prem_b=0.0,
     band_low=None,
     band_high=None,
+    inventory_dir="관측없음",
+    inventory_mom=None,
 ):
     """현재 엔진 상태 → Gemini 지정학 브리핑. 입력 동일하면 캐시(재과금 방지)."""
     client = _client()
@@ -61,12 +63,14 @@ def generate_briefing(
     innov_str = "관측없음" if shock_innovation is None else f"{shock_innovation:+.2f}"
     disp_str = "-" if dispersion_z is None else f"{dispersion_z:+.1f}σ"
     band_str = "-" if band_low is None else f"{band_low:.3f} ~ {band_high:.3f}"
+    inv_mom_str = "" if inventory_mom is None else f" (전월비 {inventory_mom:+.1f}%)"
     prompt = f"""다음은 Geo-Swap 플랫폼의 현재 분석 상태입니다.
 
 [국면 판정 — 가장 먼저 읽을 것]
 - 충격 유형: {shock_label} (신뢰도 {shock_confidence})
 - 지정학 혁신 z(AR(5) 잔차): {innov_str}   ← 지수 '수준'이 아니라 '예상 밖의 정도'
 - 벤치마크 분기 z(Brent−Dubai): {disp_str}
+- 재고 방향: {inventory_dir}{inv_mom_str}   ← Kilian(2009) 식별자. 축적=예비적 수요, 인출=물리적 교란
 - 안전 산지(B)에 부과된 희소성 프리미엄: {scarcity_prem_b:.1%}
 - 스왑비율 불확실성 밴드: {band_str}
 
@@ -84,7 +88,11 @@ def generate_briefing(
 - 스왑비율 > 1.0 → A가 (품질 등으로) 프리미엄 → 현 시점 직접 차익은 제한적. 다만 A 지역 지정학 리스크 상승(AI-GPR↑) 시 할인이 확대되는 진입 기회를 주목하라.
 
 [국면별 해석 규칙 — 반드시 따를 것]
-- **지역 공급·예비적 충격**: 두 벤치마크가 갈라진 국면. B(안전 산지)에 희소성 프리미엄이 붙어
+- **예비적 수요**: 재고가 쌓이면서 가격이 오른 국면. Kilian·Park(2009) 기준 **세 유형 중 자산가격에
+  유의한 음(−) 효과를 갖는 유일한 유형**이다. 스왑 유인 최대이며, 하방 리스크도 함께 경고할 것.
+- **공급교란**: 재고를 헐어 쓰는 국면. 물리적 차질이다. 스왑 유인이 크나, 자산가격 효과는
+  Kilian·Park 기준 유의하지 않았음을 함께 밝힐 것 — 과장 금지.
+- **지역 공급·예비적 충격**(재고 미관측으로 미분리): 두 벤치마크가 갈라진 국면. B(안전 산지)에 희소성 프리미엄이 붙어
   스왑비율이 급락한다. **스왑 유인이 최대인 국면**이며, A 권리를 확보해 B 실물로 교환할 실익이 크다.
 - **글로벌 총수요**: 두 산지가 함께 오른다 → 교환비율이 거의 안 바뀐다.
   **스왑 유인이 낮다고 명확히 말할 것.** 억지로 추천하지 마세요.
