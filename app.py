@@ -36,18 +36,15 @@ from src.engine import (
     resolve_benchmark,
 )
 from src.shocks import (
-    KAPPA,
-    KAPPA_RANGE,
-    benchmark_dispersion,
-    classify_shock,
+    SPREAD_SHOCK_PP,
+    classify_regime,
     country_gpr_innovation,
     credit_discount,
+    delivery_discount,
     gpr_coverage,
     gpr_source,
     inventory_signal,
-    monthly_series_v2,
-    scarcity_premium,
-    swap_rate_band,
+    monthly_regime_series,
 )
 
 DATA_SOURCE_FOOTER = (
@@ -773,57 +770,49 @@ def tab_swap_calculator(prices):
         geo_discount_b=discount_b,
     )
 
-    # ── v2: 국면 판정 + 밴드 ────────────────────────────────────────────────
-    verdict = classify_shock(prices, selected_month)
-    band = swap_rate_band(
-        name_a, float(selected_row[bench_a]),
-        name_b, float(selected_row[bench_b]),
-        selected_month, verdict,
-    )
-    prem_b = scarcity_premium(name_b, selected_month, verdict)
-    prem_a = scarcity_premium(name_a, selected_month, verdict)
+    # ── v3: 국면 판정 ──────────────────────────────────────────────────────
+    regime = classify_regime(prices, selected_month)
+    dd = delivery_discount(prices, selected_month)
+    inv_c = inventory_signal(selected_month)
 
     badge = {
-        "supply_disruption": "🔴", "precautionary": "🔴", "regional_supply": "🔴",
-        "aggregate_demand": "🟡", "quiet": "🟢", "undetermined": "⚪", "no_data": "⚫",
-    }[verdict.kind]
-    st.markdown(
-        f"#### {badge} 국면 판정 — **{verdict.label}** (신뢰도 {verdict.confidence})"
-    )
+        "transit_shock": "🔴", "producer_shock": "🟠", "aggregate_demand": "🟡",
+        "quiet": "🟢", "undetermined": "⚪", "no_data": "⚫",
+    }[regime.kind]
+    st.markdown(f"#### {badge} 국면 — **{regime.label}** (신뢰도 {regime.confidence})")
+
     vc1, vc2, vc3 = st.columns(3)
-    vc1.metric(
-        "스왑비율 (v2)", f"{band['mid']:.3f}",
-        help="벤치마크 × 품질보정 × (1−신용할인) × (1+희소성 프리미엄)",
-    )
-    vc2.metric("불확실성 밴드", f"{band['low']:.3f} ~ {band['high']:.3f}",
-               help="κ 파라미터 불확실성 전파. 표본오차가 아니다.")
-    vc3.metric(
-        f"{name_b} 희소성 프리미엄", f"{prem_b:+.1%}" if prem_b else "미부과",
-        help="지역 공급·예비적 충격일 때만 부과된다. 총수요 충격에는 부과하지 않는다.",
-    )
-    if verdict.kind == "aggregate_demand":
-        st.info("두 벤치마크가 함께 움직인 국면이다 — **교환비율이 거의 바뀌지 않으므로 스왑 유인이 낮다.** (Kilian·Park 2009)")
-    elif verdict.kind == "precautionary":
+    vc1.metric("스왑비율", f"{rate:.3f}" if rate == rate else "—",
+               help="A 1배럴 = B 몇 배럴 (품질·국가등급 반영)")
+    vc2.metric("인도위험 초과할인", f"{regime.excess_discount:+.1f}%p",
+               help="중동산이 대서양산 대비 받는 초과 할인. 관측치.")
+    vc3.metric("지정학 혁신 z",
+               "관측없음" if pd.isna(regime.innovation) else f"{regime.innovation:+.2f}")
+
+    if regime.kind == "transit_shock":
         st.error(
-            "**예비적 수요 충격** — 재고가 쌓이면서 가격이 올랐다. Kilian·Park(2009) 기준 "
-            "**세 유형 중 자산가격에 유의한 음(−) 효과를 갖는 유일한 유형**이며, 스왑 유인도 최대다."
+            "**수송로 충격** — 봉쇄된 산지의 배럴이 좌초되어 할인 거래되고 있다. "
+            "**스왑 유인이 최대인 국면**이나, 싸진 것은 가격이지 접근권이 아니다."
         )
-    elif verdict.kind == "supply_disruption":
-        st.error("**물리적 공급교란** — 재고를 헐어 쓰고 있다. 스왑 유인이 크다.")
-    elif verdict.kind == "regional_supply":
-        st.error("산지가 갈라진 국면이다 — **스왑 유인이 최대**인 구간. (재고 미관측으로 유형 미분리)")
-    elif verdict.kind in ("undetermined", "no_data"):
-        st.warning("희소성 프리미엄을 부과하지 않았다. 지정학 사건 대부분은 가격으로 전이되지 않는다(Kilian 2008).")
-    if verdict.inventory_dir and inventory_signal(selected_month).get("conflict"):
-        _i = inventory_signal(selected_month)
+    elif regime.kind == "producer_shock":
         st.warning(
-            f"⚠ **재고 괴리** — OECD {_i['oecd']['mom']:+.2f}% vs 미국 {_i['us']['mom']:+.2f}%. "
-            "부족이 미국이 아니라 OECD(한국 포함)에 왔다. 자세한 내용은 「⚡ 충격 유형 판정」 탭 참조."
+            "**생산자 충격** — 벤치마크가 나란히 움직인다. 물량이 재배치되며 "
+            "**산지 간 교환비율이 거의 바뀌지 않으므로 스왑 유인이 낮다.** (Kilian·Park 2009)"
+        )
+    elif regime.kind == "aggregate_demand":
+        st.info("**글로벌 총수요** — 전면적 이동이라 교환비율이 거의 안 바뀐다. 스왑 유인 낮음.")
+    elif regime.kind in ("undetermined", "no_data"):
+        st.warning("지정학에 귀속할 근거가 없어 지정학 국면으로 판정하지 않았다 (Kilian 2008).")
+
+    if inv_c.get("conflict"):
+        st.warning(
+            f"⚠ **재고 괴리** — OECD {inv_c['oecd']['mom']:+.2f}% vs 미국 {inv_c['us']['mom']:+.2f}%. "
+            "부족이 미국이 아니라 OECD(한국 포함)에 왔다. 「⚡ 국면 판정」 탭 참조."
         )
     with st.expander("판정 근거 보기"):
-        for e in verdict.evidence:
+        for e in regime.evidence:
             st.markdown(f"- {e}")
-        for cav in verdict.caveats:
+        for cav in regime.caveats:
             st.caption(f"⚠ {cav}")
     st.divider()
     quality_a = 1.0 if name_a in BENCHMARKS else float(quality_adj(name_a))
@@ -938,19 +927,19 @@ def tab_swap_calculator(prices):
                 volume_bbl,
                 co2_saved,
                 freight_saved,
-                shock_label=verdict.label,
-                shock_confidence=verdict.confidence,
-                shock_innovation=None if pd.isna(verdict.innovation) else float(verdict.innovation),
-                dispersion_z=float(verdict.dispersion_z),
-                scarcity_prem_b=float(prem_b),
-                inventory_dir=verdict.inventory_dir,
-                inventory_mom=None if pd.isna(verdict.inventory_mom) else float(verdict.inventory_mom),
-                inventory_source=inventory_signal(selected_month).get("source", "-"),
-                inventory_conflict=bool(inventory_signal(selected_month).get("conflict")),
-                inv_oecd=(inventory_signal(selected_month).get("oecd") or {}).get("mom"),
-                inv_us=(inventory_signal(selected_month).get("us") or {}).get("mom"),
-                band_low=float(band["low"]),
-                band_high=float(band["high"]),
+                shock_label=regime.label,
+                shock_confidence=regime.confidence,
+                shock_innovation=None if pd.isna(regime.innovation) else float(regime.innovation),
+                dispersion_z=float(regime.excess_discount),
+                scarcity_prem_b=0.0,
+                inventory_dir=regime.inventory_dir,
+                inventory_mom=None if pd.isna(regime.inventory_mom) else float(regime.inventory_mom),
+                inventory_source=inv_c.get("source", "-"),
+                inventory_conflict=bool(inv_c.get("conflict")),
+                inv_oecd=(inv_c.get("oecd") or {}).get("mom"),
+                inv_us=(inv_c.get("us") or {}).get("mom"),
+                band_low=None,
+                band_high=None,
             )
         if text is None:
             st.info(
@@ -1014,165 +1003,109 @@ def tab_shock_regime(prices):
     default_idx = month_options.index("2026-03") if "2026-03" in month_options else len(month_options) - 1
     month = st.select_slider("판정 기준 월", options=month_options, value=month_options[default_idx])
 
-    v = classify_shock(prices, month)
-    disp = benchmark_dispersion(prices, month)
-
+    r = classify_regime(prices, month)
+    dd = delivery_discount(prices, month)
     inv = inventory_signal(month)
+
     tone = {
-        "supply_disruption": ("🔴", "error"),
-        "precautionary": ("🔴", "error"),
-        "regional_supply": ("🔴", "error"),
+        "transit_shock": ("🔴", "error"),
+        "producer_shock": ("🟠", "warning"),
         "aggregate_demand": ("🟡", "warning"),
         "quiet": ("🟢", "success"),
         "undetermined": ("⚪", "info"),
         "no_data": ("⚫", "info"),
-    }[v.kind]
+    }[r.kind]
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("판정", f"{tone[0]} {v.label}")
-    c2.metric("신뢰도", v.confidence)
+    c1.metric("국면", f"{tone[0]} {r.label}")
+    c2.metric("신뢰도", r.confidence)
+    c3.metric(
+        "인도위험 초과할인",
+        f"{r.excess_discount:+.1f}%p",
+        help="중동산(Dubai)이 대서양산(Brent) 대비 받는 할인율에서 평시 중위값을 뺀 값. 관측치이며 추정치가 아니다.",
+    )
+    c4.metric(
+        "지정학 혁신 z",
+        "관측없음" if pd.isna(r.innovation) else f"{r.innovation:+.2f}",
+        help="log(1+GPR)의 AR(5) 잔차. 수준이 아니라 '예상 밖의 정도'를 잰다.",
+    )
     c5.metric(
         "재고 방향",
         inv["dir"] if inv["available"] else "관측없음",
         f"{inv['mom']:+.1f}% MoM" if inv["available"] else None,
-        help="주 지표는 OECD 상업재고. 가격↑ + 축적 = 예비적 수요 / 가격↑ + 인출 = 물리적 공급교란 (Kilian 2009)",
-    )
-    c3.metric(
-        "지정학 혁신 z",
-        "관측없음" if pd.isna(v.innovation) else f"{v.innovation:+.2f}",
-        help="log(1+GPR)의 AR(5) 잔차. 수준이 아니라 '예상 밖의 정도'를 잰다.",
-    )
-    c4.metric(
-        "벤치마크 분기 z",
-        f"{v.dispersion_z:+.1f}σ",
-        help="Brent−Dubai 스프레드가 평시 분포(중위수·MAD)에서 벗어난 정도.",
+        help="주 지표는 OECD 상업재고. 미국은 보조.",
     )
 
-    getattr(st, tone[1])(f"**{v.label}** — 신뢰도 {v.confidence}")
+    getattr(st, tone[1])(f"**{r.label}** — 신뢰도 {r.confidence}")
 
     st.subheader("판정 근거")
-    for e in v.evidence:
+    for e in r.evidence:
         st.markdown(f"- {e}")
-    for cav in v.caveats:
+    for cav in r.caveats:
         st.warning(cav)
 
-    st.divider()
-    st.subheader("재고가 가르는 두 유형 — Kilian(2009) 식별")
-    st.markdown(
-        "가격이 오른 것만으로는 **왜** 올랐는지 알 수 없다. 재고 방향이 그것을 가른다."
-    )
-    st.dataframe(
-        pd.DataFrame([
-            {"유형": "공급교란", "재고": "인출·정체", "뜻": "실제로 부족해서 보유분을 헐어 쓴다",
-             "자산가격 함의": "Kilian·Park(2009): 누적 주가수익률에 **유의한 효과 없음**"},
-            {"유형": "예비적 수요", "재고": "축적", "뜻": "장래 공급부족을 우려해 미리 사둔다",
-             "자산가격 함의": "**유의한 음(−)** — 세 유형 중 하방 리스크가 가장 큰 유형"},
-        ]),
-        hide_index=True, use_container_width=True,
-    )
-    if inv["available"]:
-        st.caption(
-            f"판정 기준: **{inv['source']}** — 전월비 **{inv['mom']:+.2f}%**, 평년 대비 **{inv['vs_norm']:+.1f}%** "
-            f"→ 방향 **{inv['dir']}**"
-        )
     if inv.get("conflict"):
         o, u = inv["oecd"], inv["us"]
         st.error(
-            f"**재고 괴리 — 이 달의 핵심 정보입니다.**  "
-            f"OECD 상업재고 **{o['mom']:+.2f}%**  vs  미국 상업재고 **{u['mom']:+.2f}%**.  "
+            f"**재고 괴리** — OECD **{o['mom']:+.2f}%** vs 미국 **{u['mom']:+.2f}%**. "
             "부족이 미국에는 오지 않고 OECD에 왔다는 뜻입니다. 미국은 순수출국이라 중동 초크포인트에 "
-            "절연돼 있고, **한국은 OECD이며 호르무즈 노출이 큽니다.** "
-            "헤드라인 유가로도, 미국 재고로도 보이지 않는 이 괴리가 한국 정유사의 실제 조달 리스크입니다."
-        )
-        st.dataframe(
-            pd.DataFrame([
-                {"지표": "OECD 상업재고 (주 지표)", "전월비": f"{o['mom']:+.2f}%", "방향": o["dir"],
-                 "한국 관련성": "**높음** — 한국이 속한 집단, 호르무즈 노출"},
-                {"지표": "미국 상업재고 (보조)", "전월비": f"{u['mom']:+.2f}%", "방향": u["dir"],
-                 "한국 관련성": "낮음 — 순수출국, 중동 초크포인트에 절연"},
-            ]),
-            hide_index=True, use_container_width=True,
+            "절연돼 있고, **한국은 OECD이며 호르무즈 노출이 큽니다.**"
         )
 
     st.divider()
-    st.subheader("이 판정이 가격에 하는 일")
+    st.subheader("두 지정학 충격은 같지 않다 — 수송로냐 생산자냐")
     st.markdown(
-        "지정학은 **부호가 반대인 두 성분**으로 나뉜다. v1 엔진은 앞의 것만 갖고 있었다."
+        "같은 「지정학 리스크」라도 **수송로를 막느냐 생산자를 막느냐**에 따라 "
+        "벤치마크 반응이 정반대다. 이 구분이 스왑 유인의 유무를 정한다."
     )
-    comp = pd.DataFrame(
-        [
-            {
-                "성분": "신용·인도 할인 (−)",
-                "성격": "구조적 (K-SURE 국가등급)",
-                "의미": "상대방·인도 리스크를 진 산지는 싸게 팔린다 (Urals형)",
-                "국면 의존": "없음 — 항상 적용",
-            },
-            {
-                "성분": "희소성 프리미엄 (+)",
-                "성격": "국면적 (지정학 혁신 × κ)",
-                "의미": "봉쇄·차질에 걸린 산지는 비싸게 팔린다 (호르무즈형)",
-                "국면 의존": "**지역 충격일 때만** 적용",
-            },
-        ]
+    st.dataframe(
+        pd.DataFrame([
+            {"국면": "수송로 충격", "사례": "2026 호르무즈 봉쇄",
+             "벤치마크": "**갈라진다** — 봉쇄된 산지가 좌초되어 할인",
+             "스왑 유인": "**최대**"},
+            {"국면": "생산자 충격", "사례": "2022 러시아 제재",
+             "벤치마크": "**나란히 간다** — 물량이 재배치되며 함께 상승",
+             "스왑 유인": "낮음"},
+        ]),
+        hide_index=True, use_container_width=True,
     )
-    st.dataframe(comp, hide_index=True, use_container_width=True)
-
     st.caption(
-        f"κ = {KAPPA:.3f} (2026-03 실측 캘리브레이션: Dubai 프리미엄 29.0% ÷ 혁신 z 3.42). "
-        f"밴드 κ ∈ [{KAPPA_RANGE[0]:.3f}, {KAPPA_RANGE[1]:.3f}] — 표본오차가 아니라 파라미터 불확실성이다."
+        f"판정 임계값 — 인도위험 초과할인 {SPREAD_SHOCK_PP:.0f}%p 이상 + 지정학 혁신 1.5σ 이상. "
+        "적합 파라미터는 없다. 크기는 추정하지 않고 **관측된 스프레드에서 직접 측정**한다."
     )
 
     st.divider()
-    st.subheader("국면 시계열 — 언제 프리미엄이 켜졌나")
-    series = monthly_series_v2(prices, "카자흐스탄", "사우디아라비아")
+    st.subheader("국면 시계열 — 언제 갈라졌나")
+    series = monthly_regime_series(prices, "카자흐스탄", "사우디아라비아")
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
-        go.Scatter(
-            x=series["연월"], y=series["스왑비율"], name="스왑비율 (카자흐→사우디)",
-            mode="lines+markers", line=dict(color="#0F766E", width=3),
-        ),
+        go.Scatter(x=series["연월"], y=series["스왑비율"], name="스왑비율 (카자흐→사우디)",
+                   mode="lines", line=dict(color="#0F766E", width=3)),
         secondary_y=False,
     )
     fig.add_trace(
-        go.Scatter(
-            x=list(series["연월"]) + list(series["연월"])[::-1],
-            y=list(series["상한"]) + list(series["하한"])[::-1],
-            fill="toself", fillcolor="rgba(15,118,110,0.13)",
-            line=dict(width=0), name="κ 불확실성 밴드", hoverinfo="skip",
-        ),
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Bar(
-            x=series["연월"], y=series["희소성프리미엄_B"],
-            name="사우디 희소성 프리미엄", marker_color="#C62828", opacity=0.45,
-        ),
+        go.Bar(x=series["연월"], y=series["인도위험 초과할인(%p)"],
+               name="인도위험 초과할인(%p)", marker_color="#C62828", opacity=0.4),
         secondary_y=True,
     )
     fig.add_hline(y=1.0, line_dash="dot", line_color="#94A3B8", secondary_y=False)
     fig.update_yaxes(title_text="스왑비율", secondary_y=False)
-    fig.update_yaxes(title_text="희소성 프리미엄", secondary_y=True, rangemode="tozero")
+    fig.update_yaxes(title_text="초과할인(%p)", secondary_y=True)
     fig.update_layout(height=430, margin=dict(t=30, b=10), legend=dict(orientation="h", y=1.12))
     st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
     st.subheader("월별 판정 이력")
-    show = series.copy()
-    show["스왑비율"] = show["스왑비율"].round(3)
-    show["밴드"] = show.apply(lambda r: f"{r['하한']:.3f} ~ {r['상한']:.3f}", axis=1)
-    st.dataframe(
-        show[["연월", "충격유형", "신뢰도", "재고", "지정학혁신", "스프레드z", "희소성프리미엄_B", "스왑비율", "밴드"]].tail(24),
-        hide_index=True,
-        use_container_width=True,
+    st.dataframe(series.tail(24), hide_index=True, use_container_width=True)
+
+    st.caption(f"지정학지수 소스 — **{gpr_source()}**  ·  보유 구간 {cov_lo} ~ {cov_hi}")
+    st.info(
+        "**이 엔진에는 적합(fitted) 파라미터가 없습니다.** 지정학지수는 국면을 **분류**하는 데만 쓰고, "
+        "할인의 크기는 **관측된 벤치마크 스프레드에서 직접 측정**합니다. "
+        "지정학 뉴스로 가격을 예측하면 과대추정이 된다는 문헌(Kilian 2008)을 설계로 옮긴 것입니다."
     )
 
-    st.caption(f"지정학지수 소스 — **{gpr_source()}**")
-    st.info(
-        f"**지정학지수 보유 구간: {cov_lo} ~ {cov_hi}.** "
-        "그 이후 월은 가격 신호가 있어도 **판정불가**로 처리하고 프리미엄을 부과하지 않는다 — "
-        "결측을 '평온'으로 읽지 않기 위한 규칙이다."
-    )
 
 def main():
     st.set_page_config(
