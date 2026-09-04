@@ -43,6 +43,7 @@ from src.shocks import (
     country_gpr_innovation,
     credit_discount,
     gpr_coverage,
+    gpr_source,
     inventory_signal,
     monthly_series_v2,
     scarcity_premium,
@@ -813,6 +814,12 @@ def tab_swap_calculator(prices):
         st.error("산지가 갈라진 국면이다 — **스왑 유인이 최대**인 구간. (재고 미관측으로 유형 미분리)")
     elif verdict.kind in ("undetermined", "no_data"):
         st.warning("희소성 프리미엄을 부과하지 않았다. 지정학 사건 대부분은 가격으로 전이되지 않는다(Kilian 2008).")
+    if verdict.inventory_dir and inventory_signal(selected_month).get("conflict"):
+        _i = inventory_signal(selected_month)
+        st.warning(
+            f"⚠ **재고 괴리** — OECD {_i['oecd']['mom']:+.2f}% vs 미국 {_i['us']['mom']:+.2f}%. "
+            "부족이 미국이 아니라 OECD(한국 포함)에 왔다. 자세한 내용은 「⚡ 충격 유형 판정」 탭 참조."
+        )
     with st.expander("판정 근거 보기"):
         for e in verdict.evidence:
             st.markdown(f"- {e}")
@@ -938,6 +945,10 @@ def tab_swap_calculator(prices):
                 scarcity_prem_b=float(prem_b),
                 inventory_dir=verdict.inventory_dir,
                 inventory_mom=None if pd.isna(verdict.inventory_mom) else float(verdict.inventory_mom),
+                inventory_source=inventory_signal(selected_month).get("source", "-"),
+                inventory_conflict=bool(inventory_signal(selected_month).get("conflict")),
+                inv_oecd=(inventory_signal(selected_month).get("oecd") or {}).get("mom"),
+                inv_us=(inventory_signal(selected_month).get("us") or {}).get("mom"),
                 band_low=float(band["low"]),
                 band_high=float(band["high"]),
             )
@@ -1024,7 +1035,7 @@ def tab_shock_regime(prices):
         "재고 방향",
         inv["dir"] if inv["available"] else "관측없음",
         f"{inv['mom']:+.1f}% MoM" if inv["available"] else None,
-        help="가격↑ + 재고 축적 = 예비적 수요 / 가격↑ + 재고 인출 = 물리적 공급교란 (Kilian 2009 식별)",
+        help="주 지표는 OECD 상업재고. 가격↑ + 축적 = 예비적 수요 / 가격↑ + 인출 = 물리적 공급교란 (Kilian 2009)",
     )
     c3.metric(
         "지정학 혁신 z",
@@ -1061,8 +1072,26 @@ def tab_shock_regime(prices):
     )
     if inv["available"]:
         st.caption(
-            f"현재 월 재고 — 전월비 **{inv['mom']:+.2f}%**, 평년(2015~2024 동월 평균) 대비 **{inv['vs_norm']:+.1f}%** "
-            f"→ 방향 판정 **{inv['dir']}**"
+            f"판정 기준: **{inv['source']}** — 전월비 **{inv['mom']:+.2f}%**, 평년 대비 **{inv['vs_norm']:+.1f}%** "
+            f"→ 방향 **{inv['dir']}**"
+        )
+    if inv.get("conflict"):
+        o, u = inv["oecd"], inv["us"]
+        st.error(
+            f"**재고 괴리 — 이 달의 핵심 정보입니다.**  "
+            f"OECD 상업재고 **{o['mom']:+.2f}%**  vs  미국 상업재고 **{u['mom']:+.2f}%**.  "
+            "부족이 미국에는 오지 않고 OECD에 왔다는 뜻입니다. 미국은 순수출국이라 중동 초크포인트에 "
+            "절연돼 있고, **한국은 OECD이며 호르무즈 노출이 큽니다.** "
+            "헤드라인 유가로도, 미국 재고로도 보이지 않는 이 괴리가 한국 정유사의 실제 조달 리스크입니다."
+        )
+        st.dataframe(
+            pd.DataFrame([
+                {"지표": "OECD 상업재고 (주 지표)", "전월비": f"{o['mom']:+.2f}%", "방향": o["dir"],
+                 "한국 관련성": "**높음** — 한국이 속한 집단, 호르무즈 노출"},
+                {"지표": "미국 상업재고 (보조)", "전월비": f"{u['mom']:+.2f}%", "방향": u["dir"],
+                 "한국 관련성": "낮음 — 순수출국, 중동 초크포인트에 절연"},
+            ]),
+            hide_index=True, use_container_width=True,
         )
 
     st.divider()
@@ -1138,6 +1167,7 @@ def tab_shock_regime(prices):
         use_container_width=True,
     )
 
+    st.caption(f"지정학지수 소스 — **{gpr_source()}**")
     st.info(
         f"**지정학지수 보유 구간: {cov_lo} ~ {cov_hi}.** "
         "그 이후 월은 가격 신호가 있어도 **판정불가**로 처리하고 프리미엄을 부과하지 않는다 — "

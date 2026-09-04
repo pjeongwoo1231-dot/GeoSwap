@@ -41,10 +41,13 @@ DISPERSION_SHOCK_Z = 2.0    # 벤치마크 스프레드가 이 이상 벌어지�
 COMOVE_MIN_PCT = 0.05       # 월 5% 이상 함께 오르면 '전면적 상승'
 
 # 희소성 프리미엄 계수. 2026-03 실측으로 캘리브레이션:
-#   관측 Dubai 프리미엄 = (128.52 − 99.60) / 99.60 = 29.0%
-#   같은 달 중동 GPR 혁신 z = 3.42  →  κ ≈ 0.290 / 3.42 ≈ 0.085
-KAPPA = 0.085
-KAPPA_RANGE = (0.055, 0.115)  # 파라미터 불확실성 밴드 (아래 주석 참조)
+#   관측 Dubai 프리미엄 = (128.52 − 99.60) / 99.60 = 29.04%
+#   같은 달 중동(GPRC_SAU) 진본 GPR 혁신 z = 5.78  →  κ = 0.2904 / 5.78 ≈ 0.0502
+# ⚠ 지수를 AI-GPR에서 진본 GPR로 교체하면서 혁신 척도가 바뀌었으므로 κ도 함께 재추정했다.
+#   (구 AI-GPR 기준 값은 z=3.42, κ=0.085였다. 척도가 다른 지수에 옛 계수를 그대로 쓰면
+#    프리미엄이 29% 대신 49%로 과대 산출된다.)
+KAPPA = 0.0502
+KAPPA_RANGE = (0.0325, 0.0680)  # 파라미터 불확실성 밴드 (상대폭은 종전과 동일)
 
 # 밴드의 성격: 표본오차가 아니라 **파라미터 불확실성**이다.
 # Brown & Huntington(2015)에서 공급→가격 배율이 5.6~12.3배로 흩어지는 것과 같은 종류의
@@ -59,6 +62,34 @@ SHOCK_LABELS = {
     "undetermined": "판정 보류",
     "no_data": "지정학 데이터 없음",
 }
+
+# 지정학지수 소스. 기본은 **진본**(Caldara & Iacoviello 2022, AER) 이다.
+# 기존 AI-GPR은 자체 생성 지수로 스케일·출처가 검증되지 않으므로 엔진 구동에서 내렸다.
+# AR(5) 혁신 방법론 자체가 이 논문의 것이므로, 같은 논문의 지수를 쓰는 것이 정합적이다.
+GPR_REAL_CSV = "gpr_real_caldara_iacoviello_monthly.csv"
+GPR_REAL_PREFIX = "GPR_REAL_"
+
+
+@lru_cache(maxsize=1)
+def _load_gpr_real() -> pd.DataFrame:
+    """Caldara & Iacoviello 진본 GPR (글로벌 + 국가/지역 분해), 월간."""
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parent.parent / "data" / GPR_REAL_CSV
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    df["연월"] = pd.to_datetime(df["Date"], errors="coerce").dt.strftime("%Y-%m")
+    for c in df.columns:
+        if c.startswith(GPR_REAL_PREFIX):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def gpr_source() -> str:
+    """현재 엔진이 구동에 쓰는 지정학지수 이름."""
+    return "진본 GPR (Caldara & Iacoviello 2022, AER)" if not _load_gpr_real().empty else "AI-GPR (자체 생성)"
+
 
 # 재고 신호 임계값 — 월간 전월비(%) 기준
 INV_BUILD_PCT = 1.5     # 이 이상 쌓이면 '축적'
@@ -81,40 +112,95 @@ def _load_inventory() -> pd.DataFrame:
     return df
 
 
+OECD_INVENTORY_CSV = "eia_steo_OECD상업재고_월간.csv"
+
+
+@lru_cache(maxsize=1)
+def _load_oecd_inventory() -> pd.DataFrame:
+    """EIA STEO의 OECD 상업재고(원유+기타액체, 백만배럴) 월간."""
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parent.parent / "data" / OECD_INVENTORY_CSV
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    for c in df.columns:
+        if c != "연월":
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def _dir_of(mom: float) -> str:
+    if mom >= INV_BUILD_PCT:
+        return "축적"
+    if mom <= INV_DRAW_PCT:
+        return "인출"
+    return "정체"
+
+
+def _one_inventory(df: pd.DataFrame, key: str, value_col: str) -> dict | None:
+    if df.empty or key is None or value_col not in df.columns:
+        return None
+    row = df.loc[df["연월"] == key]
+    if row.empty or pd.isna(row.iloc[0]["전월비_pct"]):
+        return None
+    mom = float(row.iloc[0]["전월비_pct"])
+    return {"mom": mom, "vs_norm": float(row.iloc[0]["평년대비_pct"]), "dir": _dir_of(mom)}
+
+
 def inventory_signal(t) -> dict:
     """월 t의 재고 방향. Kilian(2009) 식별의 핵심 판별자.
 
     · 가격↑ + 재고 **축적** → 예비적 수요 (장래 공급부족을 우려해 미리 사둔다)
     · 가격↑ + 재고 **인출·정체** → 물리적 공급교란 (실제로 부족해서 헐어 쓴다)
 
-    ⚠ 미국 상업재고는 **세계 재고의 대리지표**다. 미국은 순수출국이고 호르무즈 노출도
-    아시아보다 작으므로, 중동 초크포인트 사건에서는 신호가 약하게 나올 수 있다.
-    OECD 상업재고를 넣으면 정확도가 올라간다.
+    **주 지표는 OECD 상업재고**(EIA STEO)다. 미국 상업재고는 보조 지표로만 쓴다 —
+    미국은 순수출국이라 호르무즈 같은 중동 초크포인트에 절연돼 있고,
+    실제로 2026-03에 두 지표가 **정반대 방향**을 가리켰다(미국 +5.0% 축적, OECD −0.9% 인출).
+    한국은 OECD 회원국이며 호르무즈 노출이 크므로 OECD 쪽이 옳은 대리지표다.
     """
     key = _month_key(t)
-    df = _load_inventory()
-    if df.empty or key is None:
-        return {"available": False, "mom": float("nan"), "vs_norm": float("nan"), "dir": "관측없음"}
-    row = df.loc[df["연월"] == key]
-    if row.empty:
-        return {"available": False, "mom": float("nan"), "vs_norm": float("nan"), "dir": "관측없음"}
-    mom = float(row.iloc[0]["전월비_pct"])
-    vs = float(row.iloc[0]["평년대비_pct"])
-    if mom >= INV_BUILD_PCT:
-        d = "축적"
-    elif mom <= INV_DRAW_PCT:
-        d = "인출"
-    else:
-        d = "정체"
-    return {"available": True, "mom": mom, "vs_norm": vs, "dir": d}
+    oecd = _one_inventory(_load_oecd_inventory(), key, "OECD재고_백만배럴")
+    us = _one_inventory(_load_inventory(), key, "재고_천배럴")
+
+    primary = oecd or us
+    if primary is None:
+        return {
+            "available": False, "mom": float("nan"), "vs_norm": float("nan"),
+            "dir": "관측없음", "source": "없음", "us": us, "oecd": oecd, "conflict": False,
+        }
+
+    # 방향 라벨(축적/정체/인출)은 임계값에 걸려 괴리를 놓친다.
+    # 부호가 반대이고 격차가 2%p를 넘으면 '괴리'로 본다.
+    conflict = bool(
+        oecd and us
+        and oecd["mom"] * us["mom"] < 0
+        and abs(oecd["mom"] - us["mom"]) >= 2.0
+    )
+    return {
+        "available": True,
+        "mom": primary["mom"],
+        "vs_norm": primary["vs_norm"],
+        "dir": primary["dir"],
+        "source": "OECD 상업재고" if oecd else "미국 상업재고(대체)",
+        "us": us,
+        "oecd": oecd,
+        "conflict": conflict,
+    }
 
 
 # ── GPR 혁신 ────────────────────────────────────────────────────────────────
 @lru_cache(maxsize=16)
 def _innovation_series(region: str) -> pd.DataFrame:
-    """log(1+GPR)의 AR(5) 잔차를 표준편차로 나눈 혁신 시계열."""
-    df = _load_gpr_oil_region_monthly()
-    col = f"GPR_OIL_{region}"
+    """log(1+GPR)의 AR(5) 잔차를 표준편차로 나눈 혁신 시계열.
+
+    진본 GPR이 있으면 그것을 쓰고, 없으면 기존 AI-GPR로 되돌아간다.
+    """
+    df = _load_gpr_real()
+    col = f"{GPR_REAL_PREFIX}{region}"
+    if df.empty or col not in df.columns:
+        df = _load_gpr_oil_region_monthly()
+        col = f"GPR_OIL_{region}"
     if df.empty or col not in df.columns:
         return pd.DataFrame(columns=["연월", "z"])
 
@@ -163,7 +249,9 @@ def gpr_innovation(region: str | None, t) -> float:
 
 def gpr_coverage() -> tuple[str | None, str | None]:
     """지정학지수가 실제로 존재하는 구간 (최초월, 최종월)."""
-    df = _load_gpr_oil_region_monthly()
+    df = _load_gpr_real()
+    if df.empty:
+        df = _load_gpr_oil_region_monthly()
     if df.empty or "연월" not in df.columns:
         return None, None
     months = df["연월"].dropna().sort_values()
@@ -296,7 +384,7 @@ def classify_shock(prices: pd.DataFrame, t, regions=("MiddleEast", "Russia")) ->
         if inv["available"] and inv["dir"] == "축적":
             kind = "precautionary"
             evidence.append(
-                f"재고 **{inv['dir']}** (전월비 {inv['mom']:+.1f}%) → 실제 부족이 아니라 "
+                f"{inv['source']} **{inv['dir']}** (전월비 {inv['mom']:+.1f}%) → 실제 부족이 아니라 "
                 f"**장래 공급부족을 우려한 선제 매수**. Kilian(2009)의 예비적 수요 충격."
             )
             evidence.append(
@@ -306,7 +394,7 @@ def classify_shock(prices: pd.DataFrame, t, regions=("MiddleEast", "Russia")) ->
         elif inv["available"] and inv["dir"] in ("인출", "정체"):
             kind = "supply_disruption"
             evidence.append(
-                f"재고 **{inv['dir']}** (전월비 {inv['mom']:+.1f}%, 평년대비 {inv['vs_norm']:+.1f}%) → "
+                f"{inv['source']} **{inv['dir']}** (전월비 {inv['mom']:+.1f}%, 평년대비 {inv['vs_norm']:+.1f}%) → "
                 f"보유분을 헐어 쓰고 있다 = **물리적 공급 차질**."
             )
         else:
@@ -325,12 +413,12 @@ def classify_shock(prices: pd.DataFrame, t, regions=("MiddleEast", "Russia")) ->
             f"두 벤치마크가 함께 {ret:+.1%} 이동, 스프레드는 정상 범위({dz:+.1f}σ) → 산지 특이가 아닌 전면적 요인"
         )
         # 가격만 보면 '총수요'로 보이지만, 재고가 빠지고 있으면 공급 제약이다.
-        if ret > 0 and inv["available"] and inv["dir"] in ("인출", "정체") and inv["vs_norm"] <= -5.0:
+        if ret > 0 and inv["available"] and inv["mom"] < 0 and geo:
             kind = "supply_disruption"
             conf = "중간"
             evidence.append(
-                f"그러나 재고가 **{inv['dir']}**(전월비 {inv['mom']:+.1f}%)이고 평년 대비 "
-                f"**{inv['vs_norm']:+.1f}%**로 깊게 내려가 있다 → 수요 확장이 아니라 **공급 제약**이다."
+                f"그러나 {inv['source']}가 **감소**(전월비 {inv['mom']:+.1f}%, 평년대비 {inv['vs_norm']:+.1f}%)했고 "
+                f"지정학 혁신(z={top_z:+.2f})이 동반됐다 → 수요 확장이 아니라 **공급 제약**이다."
             )
             evidence.append(
                 "가격만 보면 두 벤치마크가 함께 올라 총수요로 보이지만, "
@@ -358,11 +446,18 @@ def classify_shock(prices: pd.DataFrame, t, regions=("MiddleEast", "Russia")) ->
             "Kilian(2009)의 식별에는 재고 방향이 필요하다 — 예비적 수요는 재고 축적을 동반하고 "
             "물리적 교란은 그렇지 않다."
         )
-    if kind in ("supply_disruption", "precautionary") and inv["available"]:
+    if inv.get("conflict"):
+        u, o = inv["us"], inv["oecd"]
         caveats.append(
-            "재고 대리지표는 **미국 상업재고(SPR 제외)**다. 미국은 순수출국이고 호르무즈 노출이 "
-            "아시아보다 작으므로 중동 초크포인트 사건에서 신호가 약하게 나올 수 있다. "
-            "OECD 상업재고를 투입하면 정확도가 올라간다."
+            f"⚠ **두 재고 지표가 반대 방향이다** — OECD {o['dir']}({o['mom']:+.1f}%) vs "
+            f"미국 {u['dir']}({u['mom']:+.1f}%). 판정은 **OECD 기준**이다. "
+            "미국은 순수출국이라 중동 초크포인트에 절연돼 있고, 한국은 OECD 회원국이며 "
+            "호르무즈 노출이 크다. **부족이 미국에는 오지 않고 우리에게 온 국면**이라는 뜻이며, "
+            "이 괴리 자체가 한국 정유사에게는 핵심 정보다."
+        )
+    if kind in ("supply_disruption", "precautionary") and inv["available"] and not inv.get("conflict"):
+        caveats.append(
+            f"재고 대리지표는 **{inv['source']}**다. 국가별 노출 구조에 따라 신호가 달라질 수 있다."
         )
 
     return ShockVerdict(

@@ -50,6 +50,10 @@ def generate_briefing(
     band_high=None,
     inventory_dir="관측없음",
     inventory_mom=None,
+    inventory_source="-",
+    inventory_conflict=False,
+    inv_oecd=None,
+    inv_us=None,
 ):
     """현재 엔진 상태 → Gemini 지정학 브리핑. 입력 동일하면 캐시(재과금 방지)."""
     client = _client()
@@ -63,14 +67,21 @@ def generate_briefing(
     innov_str = "관측없음" if shock_innovation is None else f"{shock_innovation:+.2f}"
     disp_str = "-" if dispersion_z is None else f"{dispersion_z:+.1f}σ"
     band_str = "-" if band_low is None else f"{band_low:.3f} ~ {band_high:.3f}"
-    inv_mom_str = "" if inventory_mom is None else f" (전월비 {inventory_mom:+.1f}%)"
+    inv_mom_str = "" if inventory_mom is None else f" (전월비 {inventory_mom:+.1f}%, 출처 {inventory_source})"
+    conflict_str = (
+        chr(10)
+        + f"- ⚠ **재고 괴리**: OECD {inv_oecd:+.2f}% vs 미국 {inv_us:+.2f}% — 부족이 미국이 아니라 "
+        + "OECD(한국 포함)에 왔다. 한국 정유사에게는 이것이 헤드라인 유가보다 중요한 정보다."
+        if inventory_conflict and inv_oecd is not None and inv_us is not None
+        else ""
+    )
     prompt = f"""다음은 Geo-Swap 플랫폼의 현재 분석 상태입니다.
 
 [국면 판정 — 가장 먼저 읽을 것]
 - 충격 유형: {shock_label} (신뢰도 {shock_confidence})
 - 지정학 혁신 z(AR(5) 잔차): {innov_str}   ← 지수 '수준'이 아니라 '예상 밖의 정도'
 - 벤치마크 분기 z(Brent−Dubai): {disp_str}
-- 재고 방향: {inventory_dir}{inv_mom_str}   ← Kilian(2009) 식별자. 축적=예비적 수요, 인출=물리적 교란
+- 재고 방향: {inventory_dir}{inv_mom_str}   ← Kilian(2009) 식별자. 축적=예비적 수요, 인출=물리적 교란{conflict_str}
 - 안전 산지(B)에 부과된 희소성 프리미엄: {scarcity_prem_b:.1%}
 - 스왑비율 불확실성 밴드: {band_str}
 
@@ -104,7 +115,8 @@ def generate_briefing(
 1) **국면 진단** — 위 충격 유형이 왜 그렇게 판정됐는지를 혁신 z와 분기 z로 설명
 2) **현황 진단** — A의 신용·인도 할인, 품질, 그로 인한 가격 괴리
 3) **스왑 판단** — 위 국면별 규칙에 따라 실행/관망을 명확히. 밴드 폭도 함께 언급
-4) **핵심 리스크 1가지**"""
+4) **핵심 리스크 1가지**
+   ※ 위에 '재고 괴리'가 표시돼 있으면, 그 괴리가 한국 정유사에게 무엇을 뜻하는지를 반드시 이 항목에 넣을 것."""
     try:
         response = client.models.generate_content(
             model=MODEL,
