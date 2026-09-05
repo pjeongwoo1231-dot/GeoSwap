@@ -46,6 +46,15 @@ from src.chokepoints import (
     exposure,
     serial_dependency,
 )
+from src.sanctions import (
+    SDN_URL,
+    SNAPSHOT_DATE,
+    coverage as sdn_coverage,
+    flag_risk_profile,
+    origin_sanctions_note,
+    program_summary,
+    screen_vessel,
+)
 from src.shocks import (
     SPREAD_SHOCK_PP,
     classify_regime,
@@ -1287,6 +1296,103 @@ def tab_chokepoints(countries):
     )
 
 
+
+def tab_trade_finance_screening(countries):
+    st.header("🛡️ 무역금융 제재 스크리닝")
+    st.markdown(
+        "**대상 금융소비자** — 원유 **직도입**은 국내 정유 4사와 한국석유공사만 수행한다. "
+        "그 아래에서 **나프타·벙커C유·아스팔트·윤활기유·석유코크스** 등 파생 원자재를 "
+        "**수입신용장(L/C)**으로 들여오는 **중견·중소 법인 금융소비자**가 이 화면의 사용자다."
+    )
+    st.markdown(
+        "**왜 필요한가** — 이들은 자체 컴플라이언스 조직이 얇다. 거래 상대가 붙여 준 선박이 "
+        "**OFAC 제재 대상(그림자 선단)**인지 모른 채 L/C를 개설하고, 사후에 계좌 동결과 "
+        "**2차 제재(secondary sanctions)**에 걸린다. **은행도 함께 걸린다.** "
+        "→ **L/C 개설 시점의 대조**가 가장 값싼 방어다."
+    )
+
+    cov = sdn_coverage()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("OFAC 제재 선박", f"{cov['total']:,}척")
+    k2.metric("유조선류", f"{cov['tankers']:,}척")
+    k3.metric("IMO 보유", f"{cov['with_imo']:,}척", f"{cov['with_imo']/max(cov['total'],1):.0%}")
+    k4.metric("목록 기준일", cov["date"])
+
+    st.divider()
+    st.subheader("① L/C 개설 전 3단 스크리닝")
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        origins = ["사우디아라비아", "아랍에미리트", "쿠웨이트", "이라크", "카타르", "미국",
+                   "카자흐스탄", "러시아", "이란", "베네수엘라", "알제리", "나이지리아"]
+        origin = st.selectbox("수입 화물 산지", origins, index=0)
+    with c2:
+        vessel = st.text_input("선박명 또는 IMO 번호", value="ARTAVIL",
+                               help="그림자 선단은 선박명을 자주 바꾼다. IMO 번호가 더 신뢰할 수 있다.")
+
+    note = origin_sanctions_note(origin)
+    st.markdown("**1단 — 산지 제재 축 대조**")
+    (st.error if note["sanctioned"] else st.success)(note["note"])
+
+    st.markdown("**2단 — 선박 대조 (OFAC SDN)**")
+    res = screen_vessel(vessel)
+    if res["status"] == "제재대상":
+        st.error(
+            f"🚨 **제재 대상 선박입니다 — L/C 개설을 중단하고 준법감시부에 회부해야 합니다.** "
+            f"({res['match_by']} 일치)"
+        )
+        st.dataframe(res["exact"], hide_index=True, use_container_width=True)
+    elif res["status"] == "유사 일치 — 확인 필요":
+        st.warning(
+            "⚠ **정확 일치는 없으나 유사한 이름의 제재 선박이 있습니다.** "
+            "그림자 선단은 선박명을 자주 바꾸므로, **IMO 번호로 재확인**해야 합니다."
+        )
+        st.dataframe(res["similar"], hide_index=True, use_container_width=True)
+    elif res["status"] == "해당없음":
+        st.success("✅ 현 스냅샷 기준 제재 목록에 없습니다.")
+        st.caption(
+            "⚠ 다만 **SDN 목록은 수시로 갱신**됩니다. 실제 운영에서는 거래 시점의 최신 목록을 조회해야 하며, "
+            "본 MVP는 저장소 동봉 스냅샷으로 동작합니다."
+        )
+    else:
+        st.info("선박명 또는 IMO를 입력하세요.")
+
+    st.markdown("**3단 — 선적국 편의치적 점검**")
+    st.caption(
+        "그림자 선단은 실소유를 감추려 **편의치적(flag of convenience)**을 쓴다. "
+        "제재 유조선의 선적국 분포가 그 서명을 그대로 보여준다."
+    )
+    st.dataframe(flag_risk_profile(), hide_index=True, use_container_width=True)
+
+    st.divider()
+    st.subheader("② 제재 프로그램별 노출 — 원유 거래에 걸리는 축")
+    st.dataframe(program_summary(), hide_index=True, use_container_width=True)
+    st.info(
+        "**이란 474척 · 러시아 213척(우크라이나 병기 157척 별도) · 베네수엘라 26척.** "
+        "원유·석유제품 거래에서 실제로 문제가 되는 제재 축이 여기에 집중돼 있다."
+    )
+
+    st.divider()
+    st.subheader("③ 왜 중견·중소 법인이 먼저 무너지는가")
+    st.markdown(
+        "Gertler & Hubbard(1988)는 **작은 기업의 매출 변동이 큰 것이 기술 선택이 아니라 "
+        "금융 조달 마찰 때문**일 수 있음을 보였다. 결정적 근거는 — 기술 선택 모형은 매출 변동성은 "
+        "설명해도 **매출과 투자 변동성이 같은 집단에서 함께 커지는 것**은 설명하지 못한다는 점이다."
+    )
+    st.warning(
+        "**함의** — 지정학 충격으로 원자재 단가가 튀면, 외부 조달 마찰이 큰 중견·중소 수입 법인이 "
+        "**가장 먼저 유동성 위기**를 겪는다. 대형 정유사는 자체 트레이딩 데스크와 파생 헤지 조직이 있지만 "
+        "이들에게는 **헤지 수단 자체가 없다.** 은행의 선제적 리스크 관리가 필요한 이유다."
+    )
+    st.caption(
+        "※ 해당 문헌은 서술 층위까지만 인용한다 — 원문이 열화 스캔본이라 표의 배수·수치는 인용하지 않는다."
+    )
+
+    st.caption(
+        f"출처: 미국 재무부 OFAC SDN 목록 (공개 다운로드, API 키 불필요) · 기준일 {SNAPSHOT_DATE}  ·  {SDN_URL}"
+    )
+
+
 def main():
     st.set_page_config(
         page_title="Geo-Swap",
@@ -1331,7 +1437,7 @@ def main():
         f"K-SURE 국가등급 2026-02 · 원유 수입 {int(countries['연도'].max())}(연간 확정통계)"
     )
 
-    tab1, tab2, tab3, tab4, tab9, tab10, tab5, tab6, tab7, tab8 = st.tabs(
+    tab1, tab2, tab3, tab4, tab9, tab10, tab11, tab5, tab6, tab7, tab8 = st.tabs(
         [
             "📊 원유 수입 구조",
             "🛢️ 유질 구성",
@@ -1339,6 +1445,7 @@ def main():
             "⭐ 석유 환율 계산기",
             "⚡ 국면 판정",
             "🚢 초크포인트 노출",
+            "🛡️ 무역금융 제재 스크리닝",
             "🔍 심층분석",
             "🌱 ESG 절감",
             "📈 시장규모·임팩트",
@@ -1358,6 +1465,8 @@ def main():
         tab_shock_regime(prices)
     with tab10:
         tab_chokepoints(countries)
+    with tab11:
+        tab_trade_finance_screening(countries)
     with tab5:
         tab_deep_analysis(countries, gpr_region_monthly, oil_quality, ksure_grades)
     with tab6:
