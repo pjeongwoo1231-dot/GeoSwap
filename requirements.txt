@@ -1,4 +1,8 @@
-streamlit
-pandas
-plotly
-google-genai
+# 심사 기간(2026-09-07 11:00 ~ 09-11 23:59) 중 배포 환경이 바뀌어 앱이 죽는 것을 막기 위해
+# 상한을 고정한다. use_container_width 는 "2025-12-31 이후 제거" 예고 상태라
+# streamlit 메이저 상향 시 33개 호출부가 한꺼번에 깨질 수 있다.
+streamlit>=1.40,<2
+pandas>=2.2,<4
+numpy>=1.26,<3
+plotly>=5.20,<8
+google-genai>=1.0,<3
