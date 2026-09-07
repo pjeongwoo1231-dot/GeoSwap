@@ -113,6 +113,19 @@ def get_data():
     return load_all()
 
 
+def ksure_grade_vintage(ksure_grades, countries):
+    """실제 수입 산지들의 K-SURE 평가일자 범위. 단일 시점으로 적지 않기 위해서다."""
+    try:
+        names = set(countries["국가"].dropna().astype(str))
+        sub = ksure_grades[ksure_grades["국가명"].astype(str).isin(names)]
+        dates = pd.to_datetime(sub["평가일자"], errors="coerce").dropna()
+        if dates.empty:
+            return "-", "-"
+        return dates.min().strftime("%Y-%m"), dates.max().strftime("%Y-%m")
+    except Exception:
+        return "-", "-"
+
+
 def footer():
     st.caption(DATA_SOURCE_FOOTER)
 
@@ -650,6 +663,7 @@ def tab_esg_savings(eu_ets: pd.DataFrame):
     with col_carbon:
         ets_eur = st.number_input(
             "탄소가격 (€/톤)",
+            help=f"기본값은 한국가스공사 공표 EU ETS {ETS_EUR_VINTAGE}년 연평균이며 원자료가 그 해에서 끝난다. 현재 EUA 시세를 직접 넣어 재계산할 수 있다.",
             key="esg_ets_eur",
             min_value=0.0,
             value=float(default_ets),
@@ -732,6 +746,7 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.
     with col_ets:
         ets_eur = st.number_input(
             "탄소가격 (€/톤)",
+            help=f"기본값은 한국가스공사 공표 EU ETS {ETS_EUR_VINTAGE}년 연평균이며 원자료가 그 해에서 끝난다. 현재 EUA 시세를 직접 넣어 재계산할 수 있다.",
             key="mi_ets_eur",
             min_value=0.0,
             value=float(default_ets),
@@ -847,7 +862,8 @@ def tab_market_impact(countries: pd.DataFrame, eu_ets: pd.DataFrame, prices: pd.
             f"- **거리**: sea-distances.org 기반 근사, 안전 인도 기준 {6400:,} nm (중동→한국)\n"
             f"- **탄소계수**: IMO VLCC 근사 ≈0.3 g CO₂/(배럴·해리) = 3e-7 t/(배럴·해리)\n"
             f"- **운임계수**: ${FREIGHT_PER_BBL_NM} / (배럴·해리)\n"
-            f"- **탄소가격**: 한국가스공사 EU ETS €{ets_eur:.2f}/톤 × ₩{EUR_KRW:,}/€\n"
+            f"- **탄소가격**: 한국가스공사 EU ETS €{ets_eur:.2f}/톤 "
+            f"(**{ETS_EUR_VINTAGE}년 연평균** — 원자료가 그 해에서 끝난다) × ₩{EUR_KRW:,}/€\n"
             f"- **수수료율**: {fee_rate:.1%} (가정·슬라이더 조정 가능)\n"
             f"- **스왑 대상**: 중동보다 먼 항로 국가 수입 전량 (거리 절감 > 0)\n"
             "- 모든 계수는 공공데이터·업계 표준 기반의 **보수적 추정**입니다."
@@ -1606,7 +1622,16 @@ def main():
         f"🟢 데이터 최신성 — 국제유가 {prices['연월'].max()} · "
         f"지정학지수 {gpr_coverage()[1]} · "
         f"원유재고 {inventory_coverage()} · "
-        f"K-SURE 국가등급 2026-02 · 원유 수입 {int(countries['연도'].max())}(연간 확정통계)"
+        f"OFAC SDN {SNAPSHOT_DATE} · "
+        f"원유 수입 {int(countries['연도'].max())}(연간 확정통계)"
+    )
+    grade_lo, grade_hi = ksure_grade_vintage(ksure_grades, countries)
+    st.caption(
+        f"🟡 기준시점 고정 계수 — K-SURE 국가등급: 주요 산지는 {grade_hi} 평가, "
+        f"수입국 전체로는 {grade_lo}~{grade_hi}로 평가일이 다르다 · "
+        f"EU ETS 탄소가격: {ETS_EUR_VINTAGE}년 연평균 €{ETS_EUR:.2f} — "
+        "원자료(한국가스공사)가 그 해에서 끝난다. 최신값이 아니므로 "
+        "「🌱 ESG 절감」·「📈 시장규모」 탭의 탄소가격 입력란에서 현재가로 바꿔 볼 수 있다."
     )
 
     render_verdict(prices, countries)
