@@ -1,8 +1,20 @@
+import time
+
 from google import genai
 from google.genai import types
 import streamlit as st
 
-MODEL = "gemini-2.5-flash"  # 안정 generate_content API. 미지원 시 "gemini-2.0-flash"로 교체
+MODEL = "gemini-2.5-flash"          # 기본 모델
+FALLBACK_MODEL = "gemini-2.0-flash"  # 기본 모델이 혼잡할 때 한 번 더
+RETRY_PLAN = ((MODEL, 0), (MODEL, 3), (FALLBACK_MODEL, 0))  # (모델, 대기초)
+
+
+class BriefingUnavailable(RuntimeError):
+    """모델 혼잡·한도·네트워크로 브리핑을 못 만든 상태.
+
+    예외로 올리는 이유 — st.cache_data는 예외를 캐시하지 않는다.
+    실패 문자열을 반환하면 같은 입력에서 영구히 실패가 굳는다.
+    """
 
 
 def _client():
@@ -119,16 +131,22 @@ def generate_briefing(
 3) **스왑 판단** — 위 국면별 규칙에 따라 실행/관망을 명확히. 수송로 충격이면 접근권 경고를 반드시 포함
 4) **핵심 리스크 1가지**
    ※ 위에 '재고 괴리'가 표시돼 있으면, 그 괴리가 한국 정유사에게 무엇을 뜻하는지를 반드시 이 항목에 넣을 것."""
-    try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM,
-                max_output_tokens=1500,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
-        return response.text
-    except Exception as e:  # 한도/네트워크/모델 오류 → 앱 안 죽게
-        return f"⚠️ AI 브리핑 생성 중 오류: {e}"
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM,
+        max_output_tokens=1500,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
+    last_err = None
+    for model, wait in RETRY_PLAN:
+        if wait:
+            time.sleep(wait)
+        try:
+            response = client.models.generate_content(
+                model=model, contents=prompt, config=config
+            )
+            if response.text:
+                return response.text
+            last_err = "빈 응답"
+        except Exception as e:  # 503 혼잡·429 한도·네트워크
+            last_err = e
+    raise BriefingUnavailable(str(last_err))

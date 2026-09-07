@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.loaders import load_all
-from src.ai_brief import generate_briefing
+from src.ai_brief import BriefingUnavailable, generate_briefing
 from src.engine import (
     BENCHMARKS,
     COUNTRY_BENCHMARK,
@@ -1101,11 +1101,18 @@ def tab_swap_calculator(prices):
     st.markdown("#### 🚢 이 스왑으로 절감되는 운송거리/탄소")
     if name_a in COUNTRY_BENCHMARK and name_b in COUNTRY_BENCHMARK:
         esg = esg_swap_metrics(name_a, name_b, 1_000_000)
-        st.markdown(
-            f"이 스왑은 운송거리 약 **{esg['distance_saved_nm']:,.0f}**해리를 줄여 "
-            f"탄소 **{esg['co2_saved_ton']:,.0f}**톤을 절감합니다 (100만 배럴 기준) → "
-            "자세히는 **'🌱 ESG 절감'** 탭"
-        )
+        if esg["distance_saved_nm"] > 0:
+            st.markdown(
+                f"이 스왑은 운송거리 약 **{esg['distance_saved_nm']:,.0f}**해리를 줄여 "
+                f"탄소 **{esg['co2_saved_ton']:,.0f}**톤을 절감합니다 (100만 배럴 기준) → "
+                "자세히는 **'🌱 ESG 절감'** 탭"
+            )
+        else:
+            st.markdown(
+                f"두 산지의 해상 항로가 사실상 같아(**{name_a}** ↔ **{name_b}**) "
+                "이 조합에서는 **운임·탄소 절감이 발생하지 않습니다**. "
+                "이 스왑의 유인은 ESG가 아니라 가격·인도 리스크 쪽에 있습니다."
+            )
     else:
         st.caption("벤치마크 직접 선택 시 항로 ESG 절감은 국가 단위로 'ESG 절감' 탭에서 확인하세요.")
 
@@ -1133,35 +1140,46 @@ def tab_swap_calculator(prices):
         "국면 판정 결과를 먼저 읽고 국면별 규칙에 따라 실행/관망을 판단합니다."
     )
     if st.button("브리핑 생성"):
-        with st.spinner("AI가 지정학 리스크를 분석 중…"):
-            text = generate_briefing(
-                name_a,
-                name_b,
-                selected_month,
-                grade_a_val,
-                api_a,
-                sulfur_a,
-                gpr_stress_a,
-                discount_a,
-                rate,
-                volume_bbl,
-                co2_saved,
-                freight_saved,
-                shock_label=regime.label,
-                shock_confidence=regime.confidence,
-                shock_innovation=None if pd.isna(regime.innovation) else float(regime.innovation),
-                dispersion_z=float(regime.excess_discount),
-                scarcity_prem_b=0.0,
-                inventory_dir=regime.inventory_dir,
-                inventory_mom=None if pd.isna(regime.inventory_mom) else float(regime.inventory_mom),
-                inventory_source=inv_c.get("source", "-"),
-                inventory_conflict=bool(inv_c.get("conflict")),
-                inv_oecd=(inv_c.get("oecd") or {}).get("mom"),
-                inv_us=(inv_c.get("us") or {}).get("mom"),
-                band_low=None,
-                band_high=None,
+        text = None
+        unavailable = False
+        try:
+            with st.spinner("AI가 지정학 리스크를 분석 중…"):
+                text = generate_briefing(
+                    name_a,
+                    name_b,
+                    selected_month,
+                    grade_a_val,
+                    api_a,
+                    sulfur_a,
+                    gpr_stress_a,
+                    discount_a,
+                    rate,
+                    volume_bbl,
+                    co2_saved,
+                    freight_saved,
+                    shock_label=regime.label,
+                    shock_confidence=regime.confidence,
+                    shock_innovation=None if pd.isna(regime.innovation) else float(regime.innovation),
+                    dispersion_z=float(regime.excess_discount),
+                    scarcity_prem_b=0.0,
+                    inventory_dir=regime.inventory_dir,
+                    inventory_mom=None if pd.isna(regime.inventory_mom) else float(regime.inventory_mom),
+                    inventory_source=inv_c.get("source", "-"),
+                    inventory_conflict=bool(inv_c.get("conflict")),
+                    inv_oecd=(inv_c.get("oecd") or {}).get("mom"),
+                    inv_us=(inv_c.get("us") or {}).get("mom"),
+                    band_low=None,
+                    band_high=None,
+                )
+        except BriefingUnavailable:
+            unavailable = True
+        if unavailable:
+            st.warning(
+                "AI 브리핑을 지금 생성하지 못했습니다 — 생성 모델이 일시적으로 혼잡합니다. "
+                "잠시 후 「브리핑 생성」을 다시 눌러 주세요. 브리핑이 없어도 상단 "
+                "「오늘의 판정」과 「⚡ 국면 판정」 탭이 같은 결론을 숫자로 제공합니다."
             )
-        if text is None:
+        elif text is None:
             st.info(
                 "AI 브리핑을 쓰려면 Streamlit Secrets에 GEMINI_API_KEY를 설정하세요. "
                 "(설정 전에도 나머지 기능은 정상)"
