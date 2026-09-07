@@ -898,7 +898,7 @@ def tab_swap_calculator(prices):
     col_break_a, col_break_b = st.columns(2)
     with col_break_a:
         st.markdown("#### A 분해")
-        st.write(f"P_ref(Dubai) = ${float(selected_row[bench_a]):.2f}")
+        st.write(f"P_ref({bench_a}) = ${float(selected_row[bench_a]):.2f}")
         st.write(f"품질보정 = {quality_a:.3f}")
         if grade_a is not None:
             st.write(
@@ -910,7 +910,7 @@ def tab_swap_calculator(prices):
         st.write(f"유효가격 = ${effective_a:.2f}")
     with col_break_b:
         st.markdown("#### B 분해")
-        st.write(f"P_ref(Dubai) = ${float(selected_row[bench_b]):.2f}")
+        st.write(f"P_ref({bench_b}) = ${float(selected_row[bench_b]):.2f}")
         st.write(f"품질보정 = {quality_b:.3f}")
         if grade_b is not None:
             st.write(
