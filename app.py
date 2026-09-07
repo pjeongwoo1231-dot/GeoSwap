@@ -56,6 +56,8 @@ from src.sanctions import (
     screen_vessel,
 )
 from src.shocks import (
+    COMOVE_MIN_PCT,
+    INNOV_SHOCK_Z,
     SPREAD_SHOCK_PP,
     classify_regime,
     country_gpr_innovation,
@@ -123,6 +125,157 @@ def render_hero():
         "나프타·벙커C유 등 파생 원자재를 **수입신용장**(L/C)으로 들여오는 중견·중소 법인과 "
         "그 은행을 위해, **지정학 조달 리스크**와 **OFAC 제재 위반 위험**을 함께 계량한다."
     )
+
+
+# ── 종합 판정 배너 ───────────────────────────────────────────────────────────
+# 11개 탭이 각자 산출한 값을 하나의 실행 판단으로 합친다.
+# 구성은 판단 → 행동 → 근거 3 → 무효화. 지표를 나열하지 않는다.
+VERDICT_A = "카자흐스탄"        # 기본 위험 산지 (탭④ 기본값과 동일)
+VERDICT_B = "사우디아라비아"    # 기본 안전 산지
+VERDICT_VOLUME_BBL = 1_000_000  # 행동 문구의 기준 물량
+
+VERDICT_STANCE = {
+    "transit_shock": ("🔴", "실행",
+                      "봉쇄된 산지의 배럴이 좌초돼 할인 거래되는 국면이다. "
+                      "**스왑 유인이 최대이나, 싸진 것은 가격이지 접근권이 아니다.**"),
+    "producer_shock": ("🟠", "비추천",
+                       "산지가 함께 비싸졌다. **교환비율이 거의 안 바뀌므로 스왑할 이유가 없다.**"),
+    "aggregate_demand": ("🟡", "관망",
+                         "전면적 가격 이동이다. **교환비율이 거의 안 바뀌므로 구조화 비용을 쓸 국면이 아니다.**"),
+    "quiet": ("🟢", "관망",
+              "평시다. 구조적 신용 차이만 남아 **스왑 유인이 크지 않다.**"),
+    "undetermined": ("⚪", "보류",
+                     "스프레드는 벌어졌으나 지정학 근거가 없다. **귀속하지 않고 관망한다.**"),
+    "no_data": ("⚪", "보류", "지정학 데이터가 없어 국면을 가르지 못한다."),
+}
+
+
+def _verdict_numbers(prices, countries):
+    month = prices["연월"].dropna().max()
+    row = prices.loc[prices["연월"] == month].iloc[-1]
+    bench_a = resolve_benchmark(VERDICT_A)
+    bench_b = resolve_benchmark(VERDICT_B)
+    eff_a = float(row[bench_a]) * quality_adj(VERDICT_A) * (1 - credit_discount(VERDICT_A))
+    eff_b = float(row[bench_b]) * quality_adj(VERDICT_B) * (1 - credit_discount(VERDICT_B))
+
+    year = int(countries["연도"].max())
+    exp = exposure(countries, year).sort_values("순노출비중", ascending=False)
+    hormuz = exp.loc[exp["관문"].str.contains("호르무즈")]
+    return {
+        "month": month,
+        "regime": classify_regime(prices, month),
+        "dd": delivery_discount(prices, month),
+        "inv": inventory_signal(month),
+        "rate": eff_a / eff_b,
+        "esg": esg_swap_metrics(VERDICT_A, VERDICT_B, VERDICT_VOLUME_BBL),
+        "top_gate": exp.iloc[0],
+        "hormuz": hormuz.iloc[0] if len(hormuz) else None,
+        "sdn": sdn_coverage(),
+    }
+
+
+def render_verdict(prices, countries):
+    """지금 무엇을 해야 하는가 — 탭에 들어가기 전에 답부터 준다."""
+    try:
+        v = _verdict_numbers(prices, countries)
+    except Exception:  # 판정이 실패해도 대시보드 본체는 살아 있어야 한다
+        return
+
+    regime, dd, inv, rate = v["regime"], v["dd"], v["inv"], v["rate"]
+    icon, stance, headline = VERDICT_STANCE.get(regime.kind, VERDICT_STANCE["undetermined"])
+    swap_now = regime.kind == "transit_shock"
+
+    if rate >= 1:
+        gap = f"{VERDICT_B}산이 물물교환 기준 **{(1 - 1 / rate) * 100:.1f}% 싸다**"
+    else:
+        gap = f"{VERDICT_A}산이 물물교환 기준 **{(1 - rate) * 100:.1f}% 싸다**"
+
+    with st.container(border=True):
+        st.markdown(
+            f"### {icon} 오늘의 판정 — {regime.label} · 스왑 **{stance}** (신뢰도 {regime.confidence})"
+        )
+        st.markdown(f"{headline} {VERDICT_A} 1배럴 = {VERDICT_B} **{rate:.3f}**배럴 — {gap}.")
+
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("석유 환율", f"{rate:.3f}")
+            st.caption(f"{VERDICT_A} → {VERDICT_B}")
+        with m2:
+            st.metric("인도위험 초과할인", f"{dd['excess']:+.1f}%p")
+            st.caption(f"Brent−Dubai {dd['spread']:+.2f} USD/bbl")
+        with m3:
+            st.metric("지정학 혁신 z", f"{regime.innovation:+.2f}")
+            st.caption("AR(5) 잔차 · 놀람의 크기")
+
+        st.markdown("**그래서 무엇을 하나**")
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            if swap_now:
+                body = (
+                    f"{VERDICT_A} 1배럴을 {VERDICT_B} {rate:.3f}배럴과 교환한다. "
+                    f"{VERDICT_VOLUME_BBL:,}배럴 기준 운임 **${v['esg']['freight_saved_usd']:,.0f}** · "
+                    f"CO₂ **{v['esg']['co2_saved_ton']:,.0f}t** 절감. "
+                    "선결조건은 가격이 아니라 **인도 확보**다."
+                )
+            else:
+                body = (
+                    f"교환비율 {rate:.3f}는 평시 범위다. 지금 구조화 비용을 쓸 국면이 아니다. "
+                    f"인도위험 초과할인이 **+{SPREAD_SHOCK_PP:.0f}%p**를 넘으면 재검토한다."
+                )
+            st.markdown(f"**① 수입 법인 — 스왑 {stance}**  \n{body}  \n→ 「⭐ 석유 환율 계산기」")
+        with a2:
+            sdn = v["sdn"]
+            st.markdown(
+                "**② 은행 여신·준법 — 국면과 무관하게 상시**  \n"
+                f"L/C 개설 전 선박을 OFAC SDN과 대조한다. 현재 제재 유조선 **{sdn['tankers']:,}척** "
+                f"(기준일 {sdn['date']}). 해당없음이 안전 보장은 아니며 IMO 번호로 재확인한다."
+                "  \n→ 「🛡️ 무역금융 제재 스크리닝」"
+            )
+        with a3:
+            gate = v["top_gate"]
+            horm = v["hormuz"]
+            horm_txt = f"호르무즈({horm['순노출비중']}%)보다 크다" if horm is not None else "가장 크다"
+            st.markdown(
+                "**③ 조달 구조 — 지금 고칠 것**  \n"
+                f"최대 관문은 **{gate['관문']}** — 순노출 {gate['순노출비중']}%로 {horm_txt}. "
+                "호르무즈 우회 물량을 안전물량으로 세면 안 된다 — 그 우회분도 결국 말라카를 지난다."
+                "  \n→ 「🚢 초크포인트 노출」"
+            )
+
+        with st.expander("이 판정의 근거 3가지와 무효화 조건"):
+            if abs(regime.innovation) < INNOV_SHOCK_Z and swap_now:
+                innov_note = "혁신은 소멸했으나 할인이 평시로 복귀하지 않아 같은 국면의 지속으로 본다."
+            else:
+                innov_note = f"임계 {INNOV_SHOCK_Z}σ와 대조해 지정학 기인 여부를 가른다."
+            if inv.get("oecd") and inv.get("us"):
+                inv_note = (
+                    f"OECD {inv['oecd']['mom']:+.2f}% vs 미국 {inv['us']['mom']:+.2f}%. "
+                    "부족이 어디에 왔는지를 가른다 — 한국은 OECD다."
+                )
+            else:
+                inv_note = "OECD 상업재고 방향으로 수급 압력을 확인한다."
+            st.markdown(
+                f"1. **인도위험 초과할인 {dd['excess']:+.1f}%p** — 평시 중위 할인 {dd['base']:.1f}%를 "
+                f"뺀 초과분이다. 관측값이며 추정이 아니다 (Brent−Dubai {dd['spread']:+.2f} USD/bbl)."
+                "  \n"
+                f"2. **지정학 혁신 z {regime.innovation:+.2f}** — log(1+GPR)의 AR(5) 잔차로, 수준이 "
+                f"아니라 놀람을 잰다 (Caldara & Iacoviello 2022). {innov_note}"
+                "  \n"
+                f"3. **재고 {inv.get('dir', '관측없음')}** — {inv_note}"
+            )
+            st.markdown(
+                "**무효화 — 이러면 이 판정은 틀린 것이다**  \n"
+                f"· 초과할인이 **+{SPREAD_SHOCK_PP:.0f}%p 아래로 복귀**하면 국면은 소멸하고 스왑 유인도 "
+                f"사라진다 (현재 {dd['excess']:+.1f}%p).  \n"
+                f"· 벤치마크가 월 **{COMOVE_MIN_PCT * 100:.0f}% 이상 함께** 움직이면서 혁신 z가 "
+                f"**{INNOV_SHOCK_Z}σ**를 넘으면 생산자 충격으로 재분류되고, 이 판단은 "
+                "**비추천으로 뒤집힌다**."
+            )
+
+        st.caption(
+            f"기준 {v['month']} · 아래 11개 탭의 산출을 하나로 합산한 결론이다. "
+            "같은 판정을 문장으로 풀어 쓴 AI 브리핑은 「⭐ 석유 환율 계산기」 탭 하단에 있다."
+        )
 
 
 def tab_import_structure(countries):
@@ -1437,6 +1590,8 @@ def main():
         f"원유재고 {inventory_coverage()} · "
         f"K-SURE 국가등급 2026-02 · 원유 수입 {int(countries['연도'].max())}(연간 확정통계)"
     )
+
+    render_verdict(prices, countries)
 
     tab1, tab2, tab3, tab4, tab9, tab10, tab11, tab5, tab6, tab7, tab8 = st.tabs(
         [
